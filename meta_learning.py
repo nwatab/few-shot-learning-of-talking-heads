@@ -9,6 +9,8 @@ from keras.utils import np_utils
 import numpy as np
 import tensorflow as tf
 
+from data_loader import flow_from_dir
+
 
 def hinge_loss(y_true, y_pred):
     """ y_true = 1 (True) or -1 (Fake) """
@@ -85,6 +87,7 @@ def meta_learn():
     num_videos = 145469 // 1000
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
+    datapath = './dataset/voxceleb2-9f/'
 
     gan = GAN(input_shape=frame_shape)
     embedder = gan.build_embedder(k)
@@ -149,13 +152,11 @@ def meta_learn():
     )
 
     # function to get feature matching layers in discriminator
-
     valid = np.ones((BATCH_SIZE, 1))
     invalid = -1. *  np.ones((BATCH_SIZE, 1))
-    print(num_batches)
+    
     for epoch in range(epochs):
-        for batch_ix in range(num_batches):
-            embedding_frames, embedding_landmarks, frames, landmarks, condition = get_batch(batch_ix, BATCH_SIZE, k, num_classes)
+        for enumerate batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in flow_from_dir(datapath, num_videos, BATCH_SIZE, k):
             d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition, 1])
             w = get_discriminator_embedding([frames, landmarks, condition, 1])[0]
             train_loss = combined.train_on_batch(
@@ -172,10 +173,8 @@ def meta_learn():
                 [fake_frames, landmarks, condition],
                 [invalid]
             )
-            print(batch_ix)
 
-        print(epoch, train_loss)
-        if epoch == 1:
+        if epoch == 0:
             break
     
 if __name__ == '__main__':
