@@ -3,6 +3,7 @@ import imageio
 from keras import utils
 import numpy as np
 
+
 def flow_from_dir(path, num_video, batch_size=48, k=8):
     """
     frame: [BATCH_SIZE, H, W, C]
