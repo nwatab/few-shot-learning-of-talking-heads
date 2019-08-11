@@ -22,11 +22,9 @@ def flow_from_dir(path, num_video, batch_size=48, k=8):
         for cur, dirs, files in os.walk(path):
             if not files:
                 continue
-            if not len(files) == 9:
-                continue
 
-            path_to_frame_dir = cur
-            path_to_lndmk_dir = cur.replace('frames', 'lndmks')
+            path_to_lndmk_dir = cur
+            path_to_frame_dir = cur.replace('lndmks', 'frames')
             frame_path = os.path.join(path_to_frame_dir, files[0])
             lndmk_path = os.path.join(path_to_lndmk_dir, files[0])
             frame.append(imageio.imread(frame_path))
@@ -37,6 +35,11 @@ def flow_from_dir(path, num_video, batch_size=48, k=8):
             lndmks_embedding_list = [imageio.imread(path) for path in lndmks_embedding_paths]
             frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
             lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
+            # augmente to 8 frames
+            if frames_embedding_arr.shape[-1] < 8 * 3:
+                frames_embedding_arr = np.concatenate(frames_embedding_arr, frames_embedding_arr[:, :, ::-1, :], axis=-1)[:, :, :, :k * 3]
+                lndmks_embedding_arr = np.concatenate(lndmks_embedding_arr, lndmks_embedding_arr[:, :, ::-1, :], axis=-1)[:, :, :, :k * 3]
+                
             frames_embedding.append(frames_embedding_arr)
             lndmks_embedding.append(lndmks_embedding_arr)
             condition.append(j)
@@ -57,7 +60,7 @@ def flow_from_dir(path, num_video, batch_size=48, k=8):
 
                 
 if __name__ == '__main__':
-    for f, l, fs, ls, c in flow_from_dir('../face-alignment/data/dataset/train/frames', num_video=1000):
+    for f, l, fs, ls, c in flow_from_dir('../face-alignment/data/dataset/train/lndmks', num_video=1000):
         yield f, l, fs, ls, c
         
     
