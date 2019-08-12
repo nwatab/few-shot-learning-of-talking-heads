@@ -8,8 +8,14 @@ from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttent
 
 
 class GAN:
-    def __init__(self, input_shape=(256, 256, 3)):
+    def __init__(self, input_shape, num_videos, k):
+        """
+        input_shape: (H, W, 3)
+        k: The number of image pairs into embedder
+        """
         self.input_shape = input_shape
+        self.num_videos = num_videos
+        self.k = k
 
     def downsample(self, x, channels, instance_normalization=False, act_name=None):
         """  Downsampling is similar to an implementation in BigGAN """
@@ -75,7 +81,7 @@ class GAN:
         inputs = Concatenate()([input_frame, input_landmark])
         hid = self.downsample(inputs, 64)
         hid = self.downsample(hid, 128)
-        hid = self.downsample(hid, 256)
+        hid = self.downsample(hid, 512)
         hid = SelfAttention(512)(hid)
         hid = self.downsample(hid, 512)
         hid = self.downsample(hid, 512)
@@ -106,7 +112,7 @@ class GAN:
         mean = DenseSN(1, name='mean')(hid)
         stdev = DenseSN(1, name='stdev')(hid)
 
-        embedder = Model(inputs=[input_frames, input_landmarks], outputs=[average_embedding, mean, stdev])
+        embedder = Model(inputs=[input_frames, input_landmarks], outputs=[average_embedding, mean, stdev], name='embedder')
         return embedder
 
     def build_generator(self):
@@ -122,18 +128,18 @@ class GAN:
         hid, fm3 = self.downsample(hid, 256, instance_normalization=True, act_name='fm3')
         hid, fm2 = self.downsample(hid, 256, instance_normalization=True, act_name='fm2')
         hid, fm1 = self.downsample(hid, 512, instance_normalization=True, act_name='fm1')
-        hid = ZeroPadding2D(padding=((0, 1),(0, 1)))(hid)  # For input size is 224p
+ #       hid = ZeroPadding2D(padding=((0, 1),(0, 1)))(hid)  # For input size is 224p
         
         hid = self.resblock(hid, 512)
         hid = self.resblock(hid, 512)
         
         hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
         hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
-        hid = Cropping2D(cropping=((0,1), (0,1)))(hid)  # For input size is 224p
+#        hid = Cropping2D(cropping=((0,1), (0,1)))(hid)  # For input size is 224p
         hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
         hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
         hid = self.upsample(hid, 128, mean, var, instance_normalization=True)
-        hid = SelfAttention(256)(hid)
+        hid = SelfAttention(128)(hid)
         hid = self.upsample(hid, 64, mean, var, instance_normalization=True)
         hid = self.upsample(hid, 64,  mean, var, instance_normalization=True)
         hid = ConvSN2D(3, (1, 1), padding='same')(hid)
@@ -141,10 +147,11 @@ class GAN:
 
         generator = Model(
             inputs=[inputs, mean, var],
-            outputs=[fake_frame, fm1, fm2, fm3, fm4, fm5, fm6, fm7])
+            outputs=[fake_frame, fm1, fm2, fm3, fm4, fm5, fm6, fm7],
+            name='generator')
         return generator
     
-    def build_discriminator(self, num_classes):
+    def build_discriminator(self, num_videos):
         """
         realicity = dot(v, w)
         w = Pc+w_0 (P: Projection Matrix; c: one-hot condition)
@@ -163,7 +170,7 @@ class GAN:
         hid = Activation('relu')(hid)
         v = GlobalSumPooling2D()(hid)
 
-        condition = Input(shape=(num_classes,), name='condition')
+        condition = Input(shape=(num_videos,), name='condition')
         W_i = DenseSN(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
         w = Bias(name='w')(W_i)  # w = W_i + w_0
         
@@ -173,6 +180,29 @@ class GAN:
         
         discriminator = Model(
             inputs=[input_frame, input_landmark, condition],
-            outputs=[realicity]
+            outputs=[realicity],
+            name='discriminator'
         )
         return discriminator
+
+    def build_models(self):
+        embedder = self.build_embedder(self.k)
+        generator = self.build_generator()
+        discriminator = self.build_discriminator(self.num_videos)
+
+        input_lndmk = generator.input[0]
+        input_embedder_frames = embedder.input[0]
+        input_embedder_lndmks = embedder.input[1]
+        average_embedding, mean, stdev = embedder([input_embedder_frames, input_embedder_lndmks])
+        fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, mean, stdev])
+        condition = discriminator.input[2]
+        realicity = discriminator([fake_frame, input_lndmk, condition])
+        combined = Model(
+            inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
+            outputs=[fake_frame, realicity, average_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
+            name='combined'
+        )
+        return combined, discriminator
+
+    def build_fewshot_discriminator(self):
+        pass
