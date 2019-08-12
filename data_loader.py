@@ -1,16 +1,20 @@
 import os
 import imageio
+import skimage
 from keras import utils
 import numpy as np
 
 
-def flow_from_dir(path, num_video, batch_size=48, k=8):
+def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8):
     """
+    params:
+    output_shape: (H, W)
+    return frame, landmark, frames, landmarks, condition
     frame: [BATCH_SIZE, H, W, C]
     landmark: [BATCH_SIZE, H, W, C]
     frames_embedding: [BATCH_SIZE, H, W, 8 * C]
     lndmks_embedding: [BATCH_SIZE, H, W, 8 * C]
-    return frame, landmark, frames, landmarks, condition
+
     """
     while True:
         j = 0
@@ -22,17 +26,24 @@ def flow_from_dir(path, num_video, batch_size=48, k=8):
         for cur, dirs, files in os.walk(path):
             if not files:
                 continue
-
             path_to_lndmk_dir = cur
             path_to_frame_dir = cur.replace('lndmks', 'frames')
             frame_path = os.path.join(path_to_frame_dir, files[0])
             lndmk_path = os.path.join(path_to_lndmk_dir, files[0])
-            frame.append(imageio.imread(frame_path))
-            lndmk.append(imageio.imread(lndmk_path))
+            frame_array = imageio.imread(frame_path)
+            lndmk_array = imageio.imread(lndmk_path)
+            if output_shape:
+                frame_array = skimage.transform.resize(frame_array, output_shape)
+                lndmk_array = skimage.transform.resize(lndmk_array, output_shape)
+            frame.append(frame_array)
+            lndmk.append(lndmk_array)
             frames_embedding_paths = [os.path.join(path_to_frame_dir, f) for f in files[1:]]
             lndmks_embedding_paths = [os.path.join(path_to_lndmk_dir, f) for f in files[1:]]
             frames_embedding_list = [imageio.imread(path) for path in frames_embedding_paths]
             lndmks_embedding_list = [imageio.imread(path) for path in lndmks_embedding_paths]
+            if output_shape:
+                frames_embedding_list = [skimage.transform.resize(img, output_shape) for img in frames_embedding_list]
+                lndmks_embedding_list = [skimage.transform.resize(img, output_shape) for img in lndmks_embedding_list]
             frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
             lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
             # augmente to 8 frames
@@ -57,10 +68,9 @@ def flow_from_dir(path, num_video, batch_size=48, k=8):
                 lndmks_embedding = []
                 condition = []
                 yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp, condition_temp
-
                 
 if __name__ == '__main__':
     for f, l, fs, ls, c in flow_from_dir('../face-alignment/data/dataset/train/lndmks', num_video=1000):
-        yield f, l, fs, ls, c
+        print(f, l, fs, ls, c)
         
     
