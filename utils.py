@@ -221,11 +221,8 @@ class SelfAttention(Layer):
     def __init__(self, number_of_filters, dtype=tf.float32):
         super(SelfAttention, self).__init__()
         self.f = ConvSN2D(number_of_filters//8, 1, strides=1, padding='same', name="f_x", dtype=dtype)
-
         self.g = ConvSN2D(number_of_filters//8, 1, strides=1, padding='same', name="g_x", dtype=dtype)
-
         self.h = ConvSN2D(number_of_filters,    1, strides=1, padding='same', name="h_x", dtype=dtype)
-
         self.gamma = tf.contrib.eager.Variable(0., dtype=dtype, trainable=True, name="gamma")
         self.flatten = tf.keras.layers.Flatten()
 
