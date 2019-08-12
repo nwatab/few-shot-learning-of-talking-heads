@@ -1,4 +1,5 @@
 from models import GAN
+import keras
 from keras.applications.vgg19 import VGG19
 import keras.backend as K
 from keras.engine import Model
@@ -54,77 +55,32 @@ def perceptual_loss(y_true, y_pred):
     sum_loss =  1e-2 * vgg19_loss + 2e-3 * vggface_loss
     return sum_loss
 
+def flatten_model(model_nested):
+    """ https://stackoverflow.com/questions/54648296/how-to-flatten-a-nested-model-keras-functional-api """
+    layers_flat = []
+    for layer in model_nested.layers:
+        try:
+            layers_flat.extend(layer.layers)
+        except AttributeError:
+            layers_flat.append(layer)
+    model_flat = keras.models.Sequential(layers_flat)
+    return model_flat
 
-def get_batch(batch_ix, batch_size=48, k=8, num_classes=140000):
-    """
-    params
-    batch_ix: j-th video. This is needed for condition
-    nb_classes: the total number of videos
-    k: get k frames from video. This is for embedder input.
-
-    return 
-    embedding_frames: (BATCH_SIZE, W, H, 3 * k) for embedder input
-    embedding_landmarks: (BATCH_SIZE, W, H, 3 * k) for embedder input
-    frames: (BATCH_SIZE, W, H, 3) for generator output and discriminator input
-    landmarks: (BATCH_SIZE, W, H, 3) for generator input and discriminator input
-    condition: (BATCG_SIZE, NUMBER_OF_CLASSES) for discriminator input
-
-    """
-    embedding_frames = np.random.rand(batch_size, 224, 224, 24)
-    embedding_landmarks = embedding_frames ** 2
-    frames = np.random.rand(batch_size, 224, 224, 3)
-    landmarks = frames ** 2
-    condition = np.repeat(np_utils.to_categorical(batch_ix, num_classes)[np.newaxis,...], batch_size, axis=0)  # not batch_ix
-    
-    return embedding_frames, embedding_landmarks, frames, landmarks, condition
-    
 def meta_learn():
     k = 8
-    num_classes = 140000//1000
-    frame_shape = h, w, c = (224, 224, 3)
+    frame_shape = h, w, c = (256, 256, 3)
     input_embedder_shape = (h, w, k * c)
-    BATCH_SIZE = 48
-    num_videos = 145469 // 1000
+    BATCH_SIZE = 4#8
+    num_videos = 145469
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
-    datapath = './dataset/voxceleb2-9f/'
+    datapath = './datasets/voxceleb2-9f/'
 
-    gan = GAN(input_shape=frame_shape)
-    embedder = gan.build_embedder(k)
-    generator = gan.build_generator()
-    discriminator = gan.build_discriminator(num_classes)
+    gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
+    combined, discriminator = gan.build_models()
+    discriminator.trainable = True
     discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
-
-    # Generator + Embedder + Discriminator
-    input_embedder_frames = Input(shape=input_embedder_shape)
-    input_embedder_landmarks = Input(shape=input_embedder_shape)
-    input_landmark = Input(shape=frame_shape)
-    condition = Input(shape=(num_classes,))
-    
-    average_embedding, mean, stdev = embedder([input_embedder_frames, input_embedder_landmarks])
-    fake_frame, g_fm1,  g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_landmark, mean, stdev])
     discriminator.trainable = False
-    get_discriminator_fms = K.function([*discriminator.input,
-                                        K.learning_phase()],
-                                       [discriminator.get_layer('fm1').output,
-                                        discriminator.get_layer('fm2').output,
-                                        discriminator.get_layer('fm3').output,
-                                        discriminator.get_layer('fm4').output,
-                                        discriminator.get_layer('fm5').output,
-                                        discriminator.get_layer('fm6').output,
-                                        discriminator.get_layer('fm7').output
-                                        ]
-                                       )
-    get_discriminator_embedding = K.function([*discriminator.input, K.learning_phase()],
-                                             [discriminator.get_layer('w').output])
-
-    realicity = discriminator([fake_frame, input_landmark, condition])
-
-    combined = Model(
-        inputs=[input_landmark, input_embedder_frames, input_embedder_landmarks, condition],
-        outputs=[fake_frame, realicity, average_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7]
-        )
-
     combined.compile(
         loss=[
             perceptual_loss,
@@ -150,21 +106,38 @@ def meta_learn():
             1e1],
         optimizer=Adam(lr=5e-5, beta_1=0.001),
     )
+    discriminator.summary()
+    combined.summary()
 
-    # function to get feature matching layers in discriminator
+    # Create model to get intermediate layers
+#    fake_frame, g_fm1,  g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, embedder.output[1], embedder.output[2]])
+
+    discriminator_fms = Model(discriminator.get_input_at(0),
+                              [discriminator.get_layer('fm1').output,
+                               discriminator.get_layer('fm2').output,
+                               discriminator.get_layer('fm3').output,
+                               discriminator.get_layer('fm4').output,
+                               discriminator.get_layer('fm5').output,
+                               discriminator.get_layer('fm6').output,
+                               discriminator.get_layer('fm7').output]
+    )
+    get_discriminator_fms = discriminator_fms.predict
+    discriminator_embedding = Model(discriminator.get_input_at(0), discriminator.get_layer('w').output)
+    get_discriminator_embedding = discriminator_embedding.predict
+
     valid = np.ones((BATCH_SIZE, 1))
     invalid = -1. *  np.ones((BATCH_SIZE, 1))
     
     for epoch in range(epochs):
-        for enumerate batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in flow_from_dir(datapath, num_videos, BATCH_SIZE, k):
-            d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition, 1])
-            w = get_discriminator_embedding([frames, landmarks, condition, 1])[0]
+        for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
+            d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition])
+            w = get_discriminator_embedding([frames, landmarks, condition])
             train_loss = combined.train_on_batch(
                 [landmarks, embedding_frames, embedding_landmarks, condition],
                 [frames, valid, w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7]
             )
 
-            fake_frames, _, _, _, _, _, _, _, _ = combined.predict(landmarks)
+            fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
             discriminator.train_on_batch(
                 [frames, landmarks, condition],
                 [valid]
@@ -173,9 +146,11 @@ def meta_learn():
                 [fake_frames, landmarks, condition],
                 [invalid]
             )
-
-        if epoch == 0:
             break
+        break
+
+    combined.save('base_combined.h5')
+    discriminator.save('base_discriminator.h5')
     
 if __name__ == '__main__':
     meta_learn()
