@@ -1,4 +1,3 @@
-from models import GAN
 import keras
 from keras.applications.vgg19 import VGG19
 import keras.backend as K
@@ -11,11 +10,12 @@ import numpy as np
 import tensorflow as tf
 
 from data_loader import flow_from_dir
+from models import GAN
 
 
 def hinge_loss(y_true, y_pred):
     """ y_true = 1 (True) or -1 (Fake) """
-    return K.maximum(0., 1. - y_true * y_pred)
+    return tf.math.maximum(0., 1. - y_true * y_pred)
 
 def _vgg19_perceptual_loss(y_true, y_pred):
     vgg19 = VGG19(input_shape=y_pred.get_shape().as_list()[1:], weights='imagenet', include_top=False)
@@ -49,42 +49,33 @@ def _vggface_perceptual_loss(y_true, y_pred):
     loss = K.mean(tf.convert_to_tensor(l1_losses))
     return loss
 
+import keras.backend as K
 def perceptual_loss(y_true, y_pred):
+    y_pred = K.print_tensor(y_pred, message='y_pred=')
     vgg19_loss = _vgg19_perceptual_loss(y_true, y_pred)
     vggface_loss = _vggface_perceptual_loss(y_true, y_pred)
     sum_loss =  1e-2 * vgg19_loss + 2e-3 * vggface_loss
+    sum_loss = K.print_tensor(sum_loss, message='sum_loss=')
     return sum_loss
-
-def flatten_model(model_nested):
-    """ https://stackoverflow.com/questions/54648296/how-to-flatten-a-nested-model-keras-functional-api """
-    layers_flat = []
-    for layer in model_nested.layers:
-        try:
-            layers_flat.extend(layer.layers)
-        except AttributeError:
-            layers_flat.append(layer)
-    model_flat = keras.models.Sequential(layers_flat)
-    return model_flat
 
 def meta_learn():
     k = 8
     frame_shape = h, w, c = (256, 256, 3)
     input_embedder_shape = (h, w, k * c)
-    BATCH_SIZE = 4#8
-    num_videos = 145469
+    BATCH_SIZE = 1
+    num_videos = 145469//1000
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
     datapath = './datasets/voxceleb2-9f/'
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     combined, discriminator = gan.build_models()
-    discriminator.trainable = True
     discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
     combined.compile(
         loss=[
             perceptual_loss,
-            hinge_loss,
+            'hinge',
             'mae',  # Embedding match loss
             'mae',  # Feature matching 1-7 below
             'mae',
@@ -96,7 +87,7 @@ def meta_learn():
         loss_weights=[
             1e0,  # VGG19 and VGG Face loss is summed up in loss function
             1e0,  # hinge loss
-            8e1,  # embedding match loss
+            8e1,  # Embedding match loss
             1e1,  # Feature matching 1-7 below
             1e1,
             1e1,
@@ -109,9 +100,6 @@ def meta_learn():
     discriminator.summary()
     combined.summary()
 
-    # Create model to get intermediate layers
-#    fake_frame, g_fm1,  g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, embedder.output[1], embedder.output[2]])
-
     discriminator_fms = Model(discriminator.get_input_at(0),
                               [discriminator.get_layer('fm1').output,
                                discriminator.get_layer('fm2').output,
@@ -122,35 +110,53 @@ def meta_learn():
                                discriminator.get_layer('fm7').output]
     )
     get_discriminator_fms = discriminator_fms.predict
-    discriminator_embedding = Model(discriminator.get_input_at(0), discriminator.get_layer('w').output)
+    discriminator_embedding = Model(discriminator.get_input_at(0), discriminator.get_layer('W_i').output)
     get_discriminator_embedding = discriminator_embedding.predict
 
     valid = np.ones((BATCH_SIZE, 1))
-    invalid = -1. *  np.ones((BATCH_SIZE, 1))
+#    invalid = -1. *  np.ones((BATCH_SIZE, 1))
+    invalid = np.zeros((BATCH_SIZE, 1))
     
     for epoch in range(epochs):
+        print('Epoch: ', epoch)
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
+            fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
             d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition])
+ #           print(get_discriminator_fms([frames, landmarks, condition]))
             w = get_discriminator_embedding([frames, landmarks, condition])
-            train_loss = combined.train_on_batch(
+            print(combined.predict([landmarks, embedding_frames, embedding_landmarks, condition]))
+            g_loss = combined.train_on_batch(
                 [landmarks, embedding_frames, embedding_landmarks, condition],
                 [frames, valid, w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7]
             )
-
+            print(combined.predict([landmarks, embedding_frames, embedding_landmarks, condition]))
+            print(g_loss)
+            print()
+            
             fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
-            discriminator.train_on_batch(
-                [frames, landmarks, condition],
-                [valid]
-            )
-            discriminator.train_on_batch(
-                [fake_frames, landmarks, condition],
-                [invalid]
-            )
+#            print(fake_frames, _)
+#            print(discriminator.predict([frames, landmarks, condition]))
+#            d_loss_real = discriminator.train_on_batch(
+#                [frames, landmarks, condition],
+#                [valid]
+#            )
+#            print(discriminator.predict([fake_frames, landmarks, condition]))
+#            d_loss_fake = discriminator.train_on_batch(
+#                [fake_frames, landmarks, condition],
+#                [invalid]
+#            )
+#            print(g_loss, (d_loss_real + d_loss_fake) / 2)
+        if epoch ==1:
             break
-        break
 
-    combined.save('base_combined.h5')
-    discriminator.save('base_discriminator.h5')
+    print(discriminator.get_layer('w').get_weights())    
+    combined.save('trained_models/meta_combined.h5')
+    combined.save_weights('trained_models/meta_combined_weights.h5')
+    combined.get_layer('discriminator').save_weights('trained_models/meta_discriminator_in_combined.h5')
+    combined.get_layer('generator').save_weights('trained_models/meta_generator_in_combined.h5')
+    combined.get_layer('embedder').save_weights('trained_models/meta_embedder_in_combined.h5')
+    discriminator.save('trained_models/meta_discriminator.h5')
+    discriminator.save_weights('trained_models/meta_discriminator_weights.h5')
     
 if __name__ == '__main__':
     meta_learn()

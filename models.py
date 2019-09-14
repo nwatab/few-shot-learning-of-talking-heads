@@ -3,19 +3,20 @@ from keras.layers import Add, Input, LeakyReLU, AveragePooling2D, GlobalAverageP
 from keras.layers.core import Activation
 from keras.models import Model
 from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
-import tensorflow as tf
+
 from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttention
 
 
 class GAN:
-    def __init__(self, input_shape, num_videos, k):
+    def __init__(self, input_shape, num_videos, k, meta=True):
         """
         input_shape: (H, W, 3)
         k: The number of image pairs into embedder
         """
-        self.input_shape = input_shape
+        self.h, self.w, self.c = self.input_shape = input_shape
         self.num_videos = num_videos
         self.k = k
+        self.meta = meta
 
     def downsample(self, x, channels, instance_normalization=False, act_name=None):
         """  Downsampling is similar to an implementation in BigGAN """
@@ -43,14 +44,14 @@ class GAN:
     def resblock(self, x, channels):
         shortcut = x
 
-        x = ConvSN2D(channels, (3, 3), padding='same')(x)
+        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         x = InstanceNormalization(axis=-1)(x)
         x = LeakyReLU(alpha=0.2)(x)
-        x = ConvSN2D(channels, (3, 3), padding='same')(x)
+        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         x = InstanceNormalization(axis=-1)(x)
 
         if shortcut.shape[-1] != channels:
-            shortcut = ConvSN2D(channels, (1, 1), padding='same')(shortcut)
+            shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer='he_normal')(shortcut)
 
         x = Add()([x, shortcut])
         return x
@@ -62,12 +63,12 @@ class GAN:
             x = InstanceNormalization(axis=-1)(x)
         x = LeakyReLU(alpha=0.2)(x)
         x = UpSampling2D(size=(2, 2))(x)
-        x = ConvSN2D(channels, (3, 3), padding='same')(x)
+        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)
         x = AdaIN()([x, mean, var])
         x = LeakyReLU(alpha=0.2)(x)
-        x = ConvSN2D(channels, (3, 3), padding='same')(x)
+        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
 
         shortcut = UpSampling2D(size=(2, 2))(shortcut)
         shortcut = ConvSN2D(channels, (1, 1))(shortcut)
@@ -92,14 +93,13 @@ class GAN:
         embedder = Model(inputs=[input_frame, input_landmark], outputs=e)
         return embedder
 
-    def build_embedder(self, k):
+    def build_embedder(self):
         """ k frames from the same sequence """
-        h, w, c = self.input_shape
-        input_frames = Input(shape=(h, w, c * k))
-        input_landmarks = Input(shape=(h, w, c * k))
+        input_frames = Input(shape=(self.h, self.w, self.c * self.k))
+        input_landmarks = Input(shape=(self.h, self.w, self.c * self.k))
 
-        input_frames_splt = [Lambda(lambda x: x[:, :, :, 3*i:3*(i+1)])(input_frames) for i in range(k)]
-        input_landmarks_splt = [Lambda(lambda x: x[:,:, :, 3*i:3*(i+1)])(input_landmarks) for i in range(k)]
+        input_frames_splt = [Lambda(lambda x: x[:, :, :, 3*i:3*(i+1)])(input_frames) for i in range(self.k)]
+        input_landmarks_splt = [Lambda(lambda x: x[:,:, :, 3*i:3*(i+1)])(input_landmarks) for i in range(self.k)]
 
         embedder = self.embed()
         embedding_vectors = [embedder([frame, landmark]) for frame, landmark in zip(input_frames_splt, input_landmarks_splt)] # List of (BATCH_SIZE, 512,)
@@ -151,7 +151,7 @@ class GAN:
             name='generator')
         return generator
     
-    def build_discriminator(self, num_videos):
+    def build_discriminator(self):
         """
         realicity = dot(v, w)
         w = Pc+w_0 (P: Projection Matrix; c: one-hot condition)
@@ -170,39 +170,51 @@ class GAN:
         hid = Activation('relu')(hid)
         v = GlobalSumPooling2D()(hid)
 
-        condition = Input(shape=(num_videos,), name='condition')
-        W_i = DenseSN(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
+        if self.meta:
+            condition = Input(shape=(self.num_videos,), name='condition')
+            W_i = DenseSN(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
+        else:
+            W_i  = Input(shape=(512,), name='e_NEW')
         w = Bias(name='w')(W_i)  # w = W_i + w_0
         
-
         innerproduct = Dot(axes=-1)([v, w])
         realicity = Bias(name='realicity')(innerproduct)
         
+        if self.meta:
+            inputs = [input_frame, input_landmark, condition]
+        else:
+            inputs = [input_frame, input_landmark, W_i]
         discriminator = Model(
-            inputs=[input_frame, input_landmark, condition],
+            inputs=inputs,
             outputs=[realicity],
             name='discriminator'
         )
         return discriminator
 
     def build_models(self):
-        embedder = self.build_embedder(self.k)
+        embedder = self.build_embedder()
         generator = self.build_generator()
-        discriminator = self.build_discriminator(self.num_videos)
+        discriminator = self.build_discriminator()
 
-        input_lndmk = generator.input[0]
-        input_embedder_frames = embedder.input[0]
-        input_embedder_lndmks = embedder.input[1]
+        input_lndmk = Input(shape=self.input_shape, name='landmarks')
+        input_embedder_frames = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_frames')
+        input_embedder_lndmks = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_lndmks')
         average_embedding, mean, stdev = embedder([input_embedder_frames, input_embedder_lndmks])
         fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, mean, stdev])
-        condition = discriminator.input[2]
-        realicity = discriminator([fake_frame, input_lndmk, condition])
-        combined = Model(
-            inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
-            outputs=[fake_frame, realicity, average_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
-            name='combined'
-        )
-        return combined, discriminator
+        if self.meta:
+            condition = Input(shape=(self.num_videos,), name='condition')
+            realicity = discriminator([fake_frame, input_lndmk, condition])
+            combined = Model(
+                inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
+                outputs=[fake_frame, realicity, average_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
+                name='combined'
+            )
+        else:
+            realicity = discriminator([fake_frame, input_lndmk, average_embedding])
+            combined = Model(
+                inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks],
+                outputs=[fake_frame, realicity, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
+                name='combined'
+            )
 
-    def build_fewshot_discriminator(self):
-        pass
+        return combined, discriminator

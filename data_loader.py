@@ -16,6 +16,10 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8):
     lndmks_embedding: [BATCH_SIZE, H, W, 8 * C]
 
     """
+    if not os.path.exists(path):
+        raise Exception(path, 'does not exist.')
+        import sys
+        sys.exist()
     while True:
         j = 0
         frame = []
@@ -57,10 +61,10 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8):
             j += 1
 
             if len(frame) == batch_size:
-                frame_temp = np.array(frame)
-                lndmk_temp = np.array(lndmk)
-                frames_embedding_temp = np.array(frames_embedding)
-                lndmks_embedding_temp = np.array(lndmks_embedding)
+                frame_temp = np.array(frame) / 127.5 - 1
+                lndmk_temp = np.array(lndmk) / 127.5 - 1
+                frames_embedding_temp = np.array(frames_embedding) / 127.5 - 1
+                lndmks_embedding_temp = np.array(lndmks_embedding) / 127.5 - 1
                 condition_temp = utils.to_categorical(condition, num_classes=num_video)
                 frame = []
                 lndmk = []
@@ -70,7 +74,8 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8):
                 yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp, condition_temp
                 
 if __name__ == '__main__':
-    for f, l, fs, ls, c in flow_from_dir('../face-alignment/data/dataset/train/lndmks', num_video=1000):
+    path = './datasets/voxceleb2-9f/train/lndmks/'
+    for f, l, fs, ls, c in flow_from_dir(path, num_video=1000):
         print(f, l, fs, ls, c)
         
     
