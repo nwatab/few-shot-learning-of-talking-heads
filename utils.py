@@ -6,30 +6,27 @@ from keras.layers import Conv2D, Dense, Flatten
 from keras.layers.pooling import _GlobalPooling2D
 
 
-
 class AdaIN(Layer):
     """ Borrowed and modified https://github.com/liuwei16/adain-keras/blob/master/layers.py """
-    def __init__(self, data_format='channels_last', eps=1e-9, **kwargs):
+    def __init__(self, data_format='channels_last', eps=1e-5, **kwargs):
         super(AdaIN, self).__init__(**kwargs)
         self.data_format = K.normalize_data_format(data_format)
         self.spatial_axis = [1, 2] if self.data_format == 'channels_last' else [2, 3]
         self.eps = eps
 
     def compute_output_shape(self, input_shape):
-        return input_shape[0]
+        return input_shape
 
     def call(self, inputs):
-        image = inputs[0]
-        if len(inputs) == 2:
-            style = inputs[1]
-            style_mean, style_var = tf.nn.moments(style, self.spatial_axis, keep_dims=True)
-        else:
-            style_mean = tf.expand_dims(tf.expand_dims(inputs[1], self.spatial_axis[0]), self.spatial_axis[1])
-            style_var = tf.expand_dims(tf.expand_dims(inputs[2], self.spatial_axis[0]), self.spatial_axis[1])
-        image_mean, image_var = tf.nn.moments(image, self.spatial_axis, keep_dims=True)
-        out = tf.nn.batch_normalization(image, image_mean,
-                                         image_var, style_mean,
-                                         tf.sqrt(style_var), self.eps)
+        """  inputs = [content, style_mean, style_std]  """
+        content, style_mean, style_std = inputs
+        content_mean, content_var = tf.nn.moments(content, self.spatial_axis, keep_dims=True)
+        out = tf.nn.batch_normalization(content,
+                                        content_mean,
+                                        content_var,
+                                        style_mean,
+                                        style_std,
+                                        self.eps)
         return out
 
     def get_config(self):
@@ -83,6 +80,35 @@ class DenseSN(Dense):
         self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
         self.built = True
 
+    def call(self, inputs, training=None):
+        def _l2normalize(v, eps=1e-5):
+            return v / (K.sum(v ** 2) ** 0.5 + eps)
+        def power_iteration(W, u):
+            _u = u
+            _v = _l2normalize(K.dot(_u, K.transpose(W)))
+            _u = _l2normalize(K.dot(_v, W))
+            return _u, _v
+        W_shape = self.kernel.shape.as_list()
+        #Flatten the Tensor
+        W_reshaped = K.reshape(self.kernel, [-1, W_shape[-1]])
+        _u, _v = power_iteration(W_reshaped, self.u)
+        #Calculate Sigma
+        sigma=K.dot(_v, W_reshaped)
+        sigma=K.dot(sigma, K.transpose(_u))
+        #normalize it
+        W_bar = W_reshaped / sigma
+        #reshape weight tensor
+        if training in {0, False}:
+            W_bar = K.reshape(W_bar, W_shape)
+        else:
+            with tf.control_dependencies([self.u.assign(_u)]):
+                 W_bar = K.reshape(W_bar, W_shape)  
+        output = K.dot(inputs, W_bar)
+        if self.use_bias:
+            output = K.bias_add(output, self.bias, data_format='channels_last')
+        if self.activation is not None:
+            output = self.activation(output)
+        return output 
 
 class ConvSN2D(Conv2D):
     """ Borrowed from https://github.com/IShengFang/SpectralNormalizationKeras """
@@ -126,7 +152,7 @@ class ConvSN2D(Conv2D):
         self.built = True
 
     def call(self, inputs, training=None):
-        def _l2normalize(v, eps=1e-12):
+        def _l2normalize(v, eps=1e-5):
             return v / (K.sum(v ** 2) ** 0.5 + eps)
         def power_iteration(W, u):
             #Accroding the paper, we only need to do power iteration one time.
@@ -211,7 +237,7 @@ class Bias(Layer):
     
     def __init__(self, initializer='zeros', **kwargs):
         super(Bias, self).__init__(**kwargs)
-        self.initializer = initializers.get(initializer)
+        self.initializer = initializer
     
     def build(self, input_shape):
         self.bias = self.add_weight(name='{}_W'.format(self.name), shape=(input_shape[-1],), initializer=self.initializer)
@@ -223,8 +249,6 @@ class Bias(Layer):
 
 
 # Self attention is Taken from https://gist.github.com/sthalles/507ce723226274db8097c24c5359d88a
-
-
 class SelfAttention(Layer):
     def __init__(self, number_of_filters, **kwargs):
         super(SelfAttention, self).__init__(**kwargs)

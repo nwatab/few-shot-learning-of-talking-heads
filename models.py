@@ -8,7 +8,7 @@ from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttent
 
 
 class GAN:
-    def __init__(self, input_shape, num_videos, k, meta=True):
+    def __init__(self, input_shape, num_videos, k):
         """
         input_shape: (H, W, 3)
         k: The number of image pairs into embedder
@@ -16,7 +16,6 @@ class GAN:
         self.h, self.w, self.c = self.input_shape = input_shape
         self.num_videos = num_videos
         self.k = k
-        self.meta = meta
 
     def downsample(self, x, channels, instance_normalization=False, act_name=None):
         """  Downsampling is similar to an implementation in BigGAN """
@@ -56,8 +55,12 @@ class GAN:
         x = Add()([x, shortcut])
         return x
 
-    def upsample(self, x, channels, mean, var, instance_normalization=False):
+    def upsample(self, x, channels, style_embedding, instance_normalization=False, name='0'):
         shortcut = x
+        style_embedding = DenseSN(512)(style_embedding)
+        style_embedding = DenseSN(512)(style_embedding)
+        style_mean = DenseSN(channels, name='style_mean'+name)(style_embedding)
+        style_std  = DenseSN(channels, name='style_std'+name, activation='relu')(style_embedding)
 
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)
@@ -66,7 +69,7 @@ class GAN:
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)
-        x = AdaIN()([x, mean, var])
+        x = AdaIN()([x, style_mean, style_std])
         x = LeakyReLU(alpha=0.2)(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
 
@@ -76,7 +79,7 @@ class GAN:
         x = Add()([x, shortcut])
         return x
 
-    def embed(self):
+    def embed(self, name='embed'):
         input_frame = Input(shape=self.input_shape)
         input_landmark = Input(shape=self.input_shape)
         inputs = Concatenate()([input_frame, input_landmark])
@@ -90,7 +93,7 @@ class GAN:
         hid = Activation('relu')(hid)
         e = GlobalSumPooling2D()(hid)
 
-        embedder = Model(inputs=[input_frame, input_landmark], outputs=e)
+        embedder = Model(inputs=[input_frame, input_landmark], outputs=e, name=name)
         return embedder
 
     def build_embedder(self):
@@ -101,26 +104,25 @@ class GAN:
         input_frames_splt = [Lambda(lambda x: x[:, :, :, 3*i:3*(i+1)])(input_frames) for i in range(self.k)]
         input_landmarks_splt = [Lambda(lambda x: x[:,:, :, 3*i:3*(i+1)])(input_landmarks) for i in range(self.k)]
 
-        embedder = self.embed()
+        embedder = self.embed(name='single_embedder')
         embedding_vectors = [embedder([frame, landmark]) for frame, landmark in zip(input_frames_splt, input_landmarks_splt)] # List of (BATCH_SIZE, 512,)
         embedding_vectors = [Lambda(lambda x: K.expand_dims(x, axis=1))(vector) for vector in embedding_vectors]  # List of (BATCH_SIZE, 1, 512)
         embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
         average_embedding = GlobalAveragePooling1D(name='average_embedding')(embeddings)
         
-        hid = DenseSN(512)(average_embedding)
-        hid = DenseSN(512)(hid)
-        mean = DenseSN(1, name='mean')(hid)
-        stdev = DenseSN(1, name='stdev')(hid)
+#        hid = DenseSN(512)(average_embedding)
+#        hid = DenseSN(512)(hid)
+#        mean = DenseSN(1, name='mean')(hid)
+#        stdev = DenseSN(1, name='stdev')(hid)
 
-        embedder = Model(inputs=[input_frames, input_landmarks], outputs=[average_embedding, mean, stdev], name='embedder')
+        embedder = Model(inputs=[input_frames, input_landmarks], outputs=average_embedding, name='embedder')
         return embedder
 
     def build_generator(self):
-        inputs = Input(shape=self.input_shape, name='landmarks')
-        mean = Input(shape=(1,), name='mean')
-        var = Input(shape=(1,), name='var')
+        landmarks = Input(shape=self.input_shape, name='landmarks')
+        style_embedding = Input(shape=(512,), name='style_embedding')
 
-        hid, fm7 = self.downsample(inputs, 64, instance_normalization=True, act_name='fm7')
+        hid, fm7 = self.downsample(landmarks, 64, instance_normalization=True, act_name='fm7')
         hid, fm6 = self.downsample(hid, 128, instance_normalization=True, act_name='fm6')
         hid, fm5 = self.downsample(hid, 256, instance_normalization=True, act_name='fm5')
         hid = SelfAttention(256)(hid)
@@ -133,25 +135,25 @@ class GAN:
         hid = self.resblock(hid, 512)
         hid = self.resblock(hid, 512)
         
-        hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
-        hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
+        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='4')
+        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='8')
 #        hid = Cropping2D(cropping=((0,1), (0,1)))(hid)  # For input size is 224p
-        hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
-        hid = self.upsample(hid, 256, mean, var, instance_normalization=True)
-        hid = self.upsample(hid, 128, mean, var, instance_normalization=True)
+        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='16')
+        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='32')
+        hid = self.upsample(hid, 128, style_embedding, instance_normalization=True, name='64')
         hid = SelfAttention(128)(hid)
-        hid = self.upsample(hid, 64, mean, var, instance_normalization=True)
-        hid = self.upsample(hid, 64,  mean, var, instance_normalization=True)
+        hid = self.upsample(hid, 64, style_embedding, instance_normalization=True, name='128')
+        hid = self.upsample(hid, 64, style_embedding, instance_normalization=True, name='256')
         hid = ConvSN2D(3, (1, 1), padding='same')(hid)
         fake_frame = Activation('tanh', name='fake_frame')(hid)
 
         generator = Model(
-            inputs=[inputs, mean, var],
+            inputs=[landmarks, style_embedding],
             outputs=[fake_frame, fm1, fm2, fm3, fm4, fm5, fm6, fm7],
             name='generator')
         return generator
     
-    def build_discriminator(self):
+    def build_discriminator(self, meta):
         """
         realicity = dot(v, w)
         w = Pc+w_0 (P: Projection Matrix; c: one-hot condition)
@@ -170,7 +172,7 @@ class GAN:
         hid = Activation('relu')(hid)
         v = GlobalSumPooling2D()(hid)
 
-        if self.meta:
+        if meta:
             condition = Input(shape=(self.num_videos,), name='condition')
             W_i = DenseSN(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
         else:
@@ -180,7 +182,7 @@ class GAN:
         innerproduct = Dot(axes=-1)([v, w])
         realicity = Bias(name='realicity')(innerproduct)
         
-        if self.meta:
+        if meta:
             inputs = [input_frame, input_landmark, condition]
         else:
             inputs = [input_frame, input_landmark, W_i]
@@ -191,17 +193,17 @@ class GAN:
         )
         return discriminator
 
-    def build_models(self):
+    def build_models(self, meta=True):
         embedder = self.build_embedder()
         generator = self.build_generator()
-        discriminator = self.build_discriminator()
+        discriminator = self.build_discriminator(meta)
 
         input_lndmk = Input(shape=self.input_shape, name='landmarks')
         input_embedder_frames = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_frames')
         input_embedder_lndmks = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_lndmks')
-        average_embedding, mean, stdev = embedder([input_embedder_frames, input_embedder_lndmks])
-        fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, mean, stdev])
-        if self.meta:
+        average_embedding = embedder([input_embedder_frames, input_embedder_lndmks])
+        fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, average_embedding])
+        if meta:
             condition = Input(shape=(self.num_videos,), name='condition')
             realicity = discriminator([fake_frame, input_lndmk, condition])
             combined = Model(

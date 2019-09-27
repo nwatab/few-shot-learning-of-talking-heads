@@ -5,7 +5,7 @@ from keras.engine import Model
 from keras.layers import Input
 from keras_vggface.vggface import VGGFace
 from keras.optimizers import Adam
-from keras.utils import np_utils
+from keras.utils import np_utils, multi_gpu_model
 import numpy as np
 import tensorflow as tf
 
@@ -49,30 +49,29 @@ def _vggface_perceptual_loss(y_true, y_pred):
     loss = K.mean(tf.convert_to_tensor(l1_losses))
     return loss
 
-import keras.backend as K
 def perceptual_loss(y_true, y_pred):
-    y_pred = K.print_tensor(y_pred, message='y_pred=')
     vgg19_loss = _vgg19_perceptual_loss(y_true, y_pred)
     vggface_loss = _vggface_perceptual_loss(y_true, y_pred)
     sum_loss =  1e-2 * vgg19_loss + 2e-3 * vggface_loss
-    sum_loss = K.print_tensor(sum_loss, message='sum_loss=')
     return sum_loss
 
 def meta_learn():
     k = 8
     frame_shape = h, w, c = (256, 256, 3)
     input_embedder_shape = (h, w, k * c)
-    BATCH_SIZE = 1
-    num_videos = 145469//1000
+    BATCH_SIZE = 48
+    num_videos = 145469
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
     datapath = './datasets/voxceleb2-9f/'
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     combined, discriminator = gan.build_models()
-    discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
+    parallel_discriminator = multi_gpu_model(discriminator, gpus=2)
+    parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
-    combined.compile(
+    parallel_combined = multi_gpu_model(combined, gpus=2)
+    parallel_combined.compile(
         loss=[
             perceptual_loss,
             'hinge',
@@ -98,6 +97,8 @@ def meta_learn():
         optimizer=Adam(lr=5e-5, beta_1=0.001),
     )
     discriminator.summary()
+    combined.get_layer('generator').summary()
+    combined.get_layer('embedder').summary()
     combined.summary()
 
     discriminator_fms = Model(discriminator.get_input_at(0),
@@ -122,37 +123,26 @@ def meta_learn():
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
             fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
             d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition])
- #           print(get_discriminator_fms([frames, landmarks, condition]))
             w = get_discriminator_embedding([frames, landmarks, condition])
-            print(combined.predict([landmarks, embedding_frames, embedding_landmarks, condition]))
-            g_loss = combined.train_on_batch(
+            g_loss = parallel_combined.train_on_batch(
                 [landmarks, embedding_frames, embedding_landmarks, condition],
                 [frames, valid, w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7]
             )
-            print(combined.predict([landmarks, embedding_frames, embedding_landmarks, condition]))
-            print(g_loss)
-            print()
-            
             fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
-#            print(fake_frames, _)
-#            print(discriminator.predict([frames, landmarks, condition]))
-#            d_loss_real = discriminator.train_on_batch(
-#                [frames, landmarks, condition],
-#                [valid]
-#            )
-#            print(discriminator.predict([fake_frames, landmarks, condition]))
-#            d_loss_fake = discriminator.train_on_batch(
-#                [fake_frames, landmarks, condition],
-#                [invalid]
-#            )
-#            print(g_loss, (d_loss_real + d_loss_fake) / 2)
-        if epoch ==1:
-            break
+            d_loss_real = parallel_discriminator.train_on_batch(
+                [frames, landmarks, condition],
+                [valid]
+            )
+            d_loss_fake = parallel_discriminator.train_on_batch(
+                [fake_frames, landmarks, condition],
+                [invalid]
+            )
+            print(g_loss, (d_loss_real + d_loss_fake) / 2)
+        print()
 
-    print(discriminator.get_layer('w').get_weights())    
+
     combined.save('trained_models/meta_combined.h5')
     combined.save_weights('trained_models/meta_combined_weights.h5')
-    combined.get_layer('discriminator').save_weights('trained_models/meta_discriminator_in_combined.h5')
     combined.get_layer('generator').save_weights('trained_models/meta_generator_in_combined.h5')
     combined.get_layer('embedder').save_weights('trained_models/meta_embedder_in_combined.h5')
     discriminator.save('trained_models/meta_discriminator.h5')
