@@ -67,10 +67,10 @@ def meta_learn():
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     combined, discriminator = gan.build_models()
-    parallel_discriminator = multi_gpu_model(discriminator, gpus=2)
-    parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
+    parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
+    parallel_discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
-    parallel_combined = multi_gpu_model(combined, gpus=2)
+    parallel_combined = multi_gpu_model(combined, gpus=4)
     parallel_combined.compile(
         loss=[
             perceptual_loss,
@@ -128,7 +128,6 @@ def meta_learn():
                 [landmarks, embedding_frames, embedding_landmarks, condition],
                 [frames, valid, w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7]
             )
-            fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
             d_loss_real = parallel_discriminator.train_on_batch(
                 [frames, landmarks, condition],
                 [valid]
@@ -141,11 +140,14 @@ def meta_learn():
         print()
 
 
+    # Save whole model
     combined.save('trained_models/meta_combined.h5')
+    discriminator.save('trained_models/meta_discriminator.h5')
+
+    # Save weights only
     combined.save_weights('trained_models/meta_combined_weights.h5')
     combined.get_layer('generator').save_weights('trained_models/meta_generator_in_combined.h5')
     combined.get_layer('embedder').save_weights('trained_models/meta_embedder_in_combined.h5')
-    discriminator.save('trained_models/meta_discriminator.h5')
     discriminator.save_weights('trained_models/meta_discriminator_weights.h5')
     
 if __name__ == '__main__':

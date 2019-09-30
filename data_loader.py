@@ -5,7 +5,7 @@ from keras import utils
 import numpy as np
 
 
-def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8):
+def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=True):
     """
     params:
     output_shape: (H, W)
@@ -57,21 +57,26 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8):
                 
             frames_embedding.append(frames_embedding_arr)
             lndmks_embedding.append(lndmks_embedding_arr)
-            condition.append(j)
-            j += 1
+            if meta:
+                condition.append(j)
+                j += 1
 
             if len(frame) == batch_size:
                 frame_temp = np.array(frame) / 127.5 - 1
                 lndmk_temp = np.array(lndmk) / 127.5 - 1
                 frames_embedding_temp = np.array(frames_embedding) / 127.5 - 1
                 lndmks_embedding_temp = np.array(lndmks_embedding) / 127.5 - 1
-                condition_temp = utils.to_categorical(condition, num_classes=num_video)
+                if meta:
+                    condition_temp = utils.to_categorical(condition, num_classes=num_video)
+                    condition = []
                 frame = []
                 lndmk = []
                 frames_embedding = []
                 lndmks_embedding = []
-                condition = []
-                yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp, condition_temp
+                if meta:
+                    yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp, condition_temp
+                else:
+                    yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
