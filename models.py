@@ -60,7 +60,7 @@ class GAN:
         style_embedding = DenseSN(512)(style_embedding)
         style_embedding = DenseSN(512)(style_embedding)
         style_mean = DenseSN(channels, name='style_mean'+name)(style_embedding)
-        style_std  = DenseSN(channels, name='style_std'+name, activation='relu')(style_embedding)
+        style_std  = DenseSN(channels, name='style_std'+ name)(style_embedding)
 
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)
@@ -103,19 +103,18 @@ class GAN:
 
         input_frames_splt = [Lambda(lambda x: x[:, :, :, 3*i:3*(i+1)])(input_frames) for i in range(self.k)]
         input_landmarks_splt = [Lambda(lambda x: x[:,:, :, 3*i:3*(i+1)])(input_landmarks) for i in range(self.k)]
-
-        embedder = self.embed(name='single_embedder')
-        embedding_vectors = [embedder([frame, landmark]) for frame, landmark in zip(input_frames_splt, input_landmarks_splt)] # List of (BATCH_SIZE, 512,)
+        single_embedder = self.embed(name='single_embedder')
+        embedding_vectors = [single_embedder([frame, landmark]) for frame, landmark in zip(input_frames_splt, input_landmarks_splt)] # List of (BATCH_SIZE, 512,)
         embedding_vectors = [Lambda(lambda x: K.expand_dims(x, axis=1))(vector) for vector in embedding_vectors]  # List of (BATCH_SIZE, 1, 512)
         embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
-        average_embedding = GlobalAveragePooling1D(name='average_embedding')(embeddings)
+        embedder_embedding = GlobalAveragePooling1D(name='embedder_embedding')(embeddings)
         
-#        hid = DenseSN(512)(average_embedding)
+#        hid = DenseSN(512)(embedder_embedding)
 #        hid = DenseSN(512)(hid)
 #        mean = DenseSN(1, name='mean')(hid)
 #        stdev = DenseSN(1, name='stdev')(hid)
 
-        embedder = Model(inputs=[input_frames, input_landmarks], outputs=average_embedding, name='embedder')
+        embedder = Model(inputs=[input_frames, input_landmarks], outputs=embedder_embedding, name='embedder')
         return embedder
 
     def build_generator(self):
@@ -201,18 +200,18 @@ class GAN:
         input_lndmk = Input(shape=self.input_shape, name='landmarks')
         input_embedder_frames = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_frames')
         input_embedder_lndmks = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_lndmks')
-        average_embedding = embedder([input_embedder_frames, input_embedder_lndmks])
-        fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, average_embedding])
+        embedder_embedding = embedder([input_embedder_frames, input_embedder_lndmks])
+        fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, embedder_embedding])
         if meta:
             condition = Input(shape=(self.num_videos,), name='condition')
             realicity = discriminator([fake_frame, input_lndmk, condition])
             combined = Model(
                 inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
-                outputs=[fake_frame, realicity, average_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
+                outputs=[fake_frame, realicity, embedder_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
                 name='combined'
             )
         else:
-            realicity = discriminator([fake_frame, input_lndmk, average_embedding])
+            realicity = discriminator([fake_frame, input_lndmk, embedder_embedding])
             combined = Model(
                 inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks],
                 outputs=[fake_frame, realicity, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
