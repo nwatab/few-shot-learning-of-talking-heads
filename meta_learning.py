@@ -66,7 +66,8 @@ def meta_learn():
     datapath = './datasets/voxceleb2-9f/'
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
-    combined, discriminator = gan.build_models()
+    with tf.device("/cpu:0"):
+        combined, discriminator = gan.build_models()
     parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
     parallel_discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
