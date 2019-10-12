@@ -11,6 +11,7 @@ import tensorflow as tf
 
 from data_loader import flow_from_dir
 from models import GAN
+#from xla_multi_gpu_utils import multi_gpu_model
 
 
 def hinge_loss(y_true, y_pred):
@@ -59,7 +60,7 @@ def meta_learn():
     k = 8
     frame_shape = h, w, c = (256, 256, 3)
     input_embedder_shape = (h, w, k * c)
-    BATCH_SIZE = 48
+    BATCH_SIZE = 1#24
     num_videos = 145469
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
@@ -68,10 +69,12 @@ def meta_learn():
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     with tf.device("/cpu:0"):
         combined, discriminator = gan.build_models()
-    parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
+#    parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
+    parallel_discriminator = discriminator
     parallel_discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
-    parallel_combined = multi_gpu_model(combined, gpus=4)
+#    parallel_combined = multi_gpu_model(combined, gpus=4)
+    parallel_combined = combined
     parallel_combined.compile(
         loss=[
             perceptual_loss,
@@ -122,6 +125,7 @@ def meta_learn():
     for epoch in range(epochs):
         print('Epoch: ', epoch)
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
+            print('batch_ix: ', batch_ix)
             fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks, condition])
             d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition])
             w = get_discriminator_embedding([frames, landmarks, condition])

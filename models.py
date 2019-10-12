@@ -1,10 +1,12 @@
 import keras.backend as K
-from keras.layers import Add, Input, LeakyReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Lambda, ZeroPadding2D, Cropping2D
+from keras.layers import Add, Input, LeakyReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
 from keras.layers.core import Activation
 from keras.models import Model
 from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
+import tensorflow as tf
 
 from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttention
+from utils import AdaInstanceNormalization
 
 
 class GAN:
@@ -22,17 +24,17 @@ class GAN:
         shortcut = x
  
         x = LeakyReLU(alpha=0.2)(x)
-        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same')(x)
+        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
         x = LeakyReLU(alpha=0.2, name=act_name)(x)
         act = x
-        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same')(x)
+        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
         x = AveragePooling2D(pool_size=(2, 2))(x)
 
-        shortcut = ConvSN2D(channels, (1, 1), padding='same')(shortcut)
+        shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer = 'he_normal')(shortcut)
         shortcut = AveragePooling2D(pool_size=(2, 2))(shortcut)
 
         x = Add()([x, shortcut])
@@ -56,11 +58,30 @@ class GAN:
         return x
 
     def upsample(self, x, channels, style_embedding, instance_normalization=False, name='0'):
+        def adain(inputs):
+            '''
+            Borrowed from https://github.com/jonrei/tf-AdaIN
+            Normalizes the `content_features` with scaling and offset from `style_features`.
+            See "5. Adaptive Instance Normalization" in https://arxiv.org/abs/1703.06868 for details.
+            '''
+            epsilon = 1e-5
+            content_features, style_mean, style_std = inputs
+            content_mean, content_variance = tf.nn.moments(content_features, [1, 2], keep_dims=True)
+            normalized_content_features = tf.nn.batch_normalization(content_features,
+                                                                    content_mean,
+                                                                    content_variance,
+                                                                    style_mean, 
+                                                                    style_std,
+                                                                    epsilon)
+            return normalized_content_features
+
         shortcut = x
-        style_embedding = DenseSN(512)(style_embedding)
-        style_embedding = DenseSN(512)(style_embedding)
-        style_mean = DenseSN(channels, name='style_mean'+name)(style_embedding)
-        style_std  = DenseSN(channels, name='style_std'+ name)(style_embedding)
+        style_embedding = DenseSN(512, kernel_initializer='he_normal')(style_embedding)
+        style_embedding = DenseSN(512, kernel_initializer='he_normal')(style_embedding)
+        style_mean = DenseSN(channels, name='style_mean'+name, kernel_initializer='he_normal')(style_embedding)
+        style_std  = DenseSN(channels, name='style_std'+ name, kernel_initializer='he_normal')(style_embedding)
+        style_mean = Reshape((1, 1, channels))(style_mean)
+        style_std  = Reshape((1, 1, channels))(style_std)
 
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)
@@ -69,15 +90,18 @@ class GAN:
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)
-        x = AdaIN()([x, style_mean, style_std])
+#        x = Lambda(adain)([x, style_mean, style_std])
+#        x = AdaIN()([x, style_mean, style_std])
+        x = AdaInstanceNormalization()([x, style_mean, style_std])
         x = LeakyReLU(alpha=0.2)(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
 
         shortcut = UpSampling2D(size=(2, 2))(shortcut)
-        shortcut = ConvSN2D(channels, (1, 1))(shortcut)
+        shortcut = ConvSN2D(channels, (1, 1), kernel_initializer='he_normal')(shortcut)
 
         x = Add()([x, shortcut])
         return x
+        
 
     def embed(self, name='embed'):
         input_frame = Input(shape=self.input_shape)
@@ -109,11 +133,6 @@ class GAN:
         embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
         embedder_embedding = GlobalAveragePooling1D(name='embedder_embedding')(embeddings)
         
-#        hid = DenseSN(512)(embedder_embedding)
-#        hid = DenseSN(512)(hid)
-#        mean = DenseSN(1, name='mean')(hid)
-#        stdev = DenseSN(1, name='stdev')(hid)
-
         embedder = Model(inputs=[input_frames, input_landmarks], outputs=embedder_embedding, name='embedder')
         return embedder
 
@@ -143,7 +162,7 @@ class GAN:
         hid = SelfAttention(128)(hid)
         hid = self.upsample(hid, 64, style_embedding, instance_normalization=True, name='128')
         hid = self.upsample(hid, 64, style_embedding, instance_normalization=True, name='256')
-        hid = ConvSN2D(3, (1, 1), padding='same')(hid)
+        hid = ConvSN2D(3, (1, 1), padding='same', kernel_initializer='he_normal')(hid)
         fake_frame = Activation('tanh', name='fake_frame')(hid)
 
         generator = Model(
@@ -197,9 +216,11 @@ class GAN:
         generator = self.build_generator()
         discriminator = self.build_discriminator(meta)
 
+        # Generator Input
         input_lndmk = Input(shape=self.input_shape, name='landmarks')
         input_embedder_frames = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_frames')
         input_embedder_lndmks = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_lndmks')
+        
         embedder_embedding = embedder([input_embedder_frames, input_embedder_lndmks])
         fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, embedder_embedding])
         if meta:

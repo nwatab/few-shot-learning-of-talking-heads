@@ -1,10 +1,54 @@
 import tensorflow as tf
-#from tensorflow.keras.engine import Layer, InputSpec
 from keras.engine import Layer, InputSpec
 from keras import backend as K
 from keras.layers import Conv2D, Dense, Flatten
 from keras.layers.pooling import _GlobalPooling2D
 
+
+#Input b and g should be 1x1xC
+class AdaInstanceNormalization(Layer):
+    def __init__(self, 
+             axis=-1,
+             momentum=0.99,
+             epsilon=1e-5,
+             center=True,
+             scale=True,
+             **kwargs):
+        super(AdaInstanceNormalization, self).__init__(**kwargs)
+        self.axis = axis
+        self.momentum = momentum
+        self.epsilon = epsilon
+        self.center = center
+        self.scale = scale
+    
+    def build(self, input_shape):    
+        super(AdaInstanceNormalization, self).build(input_shape) 
+    
+    def call(self, inputs, training=None):
+        content, style_mean, style_std = inputs[0], inputs[1], inputs[2]
+        input_shape = K.int_shape(content)
+        reduction_axes = [1, 2]  #list(range(0, len(input_shape)))
+
+        mean = K.mean(content, reduction_axes, keepdims=True)
+        stddev = K.std(content, reduction_axes, keepdims=True) + self.epsilon
+#        styled_content = style_mean + style_std * (content - mean) / stddev
+        styled_content = content * style_std
+        return styled_content
+    
+    def get_config(self):
+        config = {
+            'axis': self.axis,
+            'momentum': self.momentum,
+            'epsilon': self.epsilon,
+            'center': self.center,
+            'scale': self.scale
+        }
+        base_config = super(AdaInstanceNormalization, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+    
+    def compute_output_shape(self, input_shape):
+        content_shape = input_shape[0]
+        return content_shape
 
 class AdaIN(Layer):
     """ Borrowed and modified https://github.com/liuwei16/adain-keras/blob/master/layers.py """
@@ -78,7 +122,8 @@ class DenseSN(Dense):
                                  name='sn',
                                  trainable=False)
         self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
-        self.built = True
+        super(DenseSN, self).build(input_shape)
+        
 
     def call(self, inputs, training=None):
         def _l2normalize(v, eps=1e-5):
@@ -149,7 +194,8 @@ class ConvSN2D(Conv2D):
         # Set input spec.
         self.input_spec = InputSpec(ndim=self.rank + 2,
                                     axes={channel_axis: input_dim})
-        self.built = True
+#        self.built = True
+        super(ConvSN2D, self).build(input_shape)
 
     def call(self, inputs, training=None):
         def _l2normalize(v, eps=1e-5):
@@ -241,6 +287,7 @@ class Bias(Layer):
     
     def build(self, input_shape):
         self.bias = self.add_weight(name='{}_W'.format(self.name), shape=(input_shape[-1],), initializer=self.initializer)
+        super(Bias, self).build(input_shape)
     
     def call(self, x):
         return K.bias_add(x, self.bias, data_format='channels_last')
