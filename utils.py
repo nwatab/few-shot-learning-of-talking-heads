@@ -5,8 +5,9 @@ from keras.layers import Conv2D, Dense, Flatten
 from keras.layers.pooling import _GlobalPooling2D
 
 
-#Input b and g should be 1x1xC
+
 class AdaInstanceNormalization(Layer):
+    """ Input b and g should be 1x1xC """
     def __init__(self, 
              axis=-1,
              momentum=0.99,
@@ -31,8 +32,7 @@ class AdaInstanceNormalization(Layer):
 
         mean = K.mean(content, reduction_axes, keepdims=True)
         stddev = K.std(content, reduction_axes, keepdims=True) + self.epsilon
-#        styled_content = style_mean + style_std * (content - mean) / stddev
-        styled_content = content * style_std
+        styled_content = style_mean + style_std * (content - mean) / stddev
         return styled_content
     
     def get_config(self):
@@ -122,8 +122,7 @@ class DenseSN(Dense):
                                  name='sn',
                                  trainable=False)
         self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
-        super(DenseSN, self).build(input_shape)
-        
+        self.built = True
 
     def call(self, inputs, training=None):
         def _l2normalize(v, eps=1e-5):
@@ -175,14 +174,16 @@ class ConvSN2D(Conv2D):
                                       initializer=self.kernel_initializer,
                                       name='kernel',
                                       regularizer=self.kernel_regularizer,
-                                      constraint=self.kernel_constraint)
+                                      constraint=self.kernel_constraint,
+                                      trainable=True)
 
         if self.use_bias:
             self.bias = self.add_weight(shape=(self.filters,),
                                         initializer=self.bias_initializer,
                                         name='bias',
                                         regularizer=self.bias_regularizer,
-                                        constraint=self.bias_constraint)
+                                        constraint=self.bias_constraint,
+                                        trainable=True)
         else:
             self.bias = None
             
@@ -194,12 +195,11 @@ class ConvSN2D(Conv2D):
         # Set input spec.
         self.input_spec = InputSpec(ndim=self.rank + 2,
                                     axes={channel_axis: input_dim})
-#        self.built = True
-        super(ConvSN2D, self).build(input_shape)
+        self.built = True
 
     def call(self, inputs, training=None):
         def _l2normalize(v, eps=1e-5):
-            return v / (K.sum(v ** 2) ** 0.5 + eps)
+            return v / K.sqrt(K.sum(K.square(v)) + eps)
         def power_iteration(W, u):
             #Accroding the paper, we only need to do power iteration one time.
             _u = u
@@ -238,7 +238,6 @@ class ConvSN2D(Conv2D):
         if self.activation is not None:
             return self.activation(outputs)
         return outputs
-
 
 class GlobalSumPooling2D(_GlobalPooling2D):
     """Global sum pooling operation for spatial data.
@@ -293,10 +292,8 @@ class Bias(Layer):
         return K.bias_add(x, self.bias, data_format='channels_last')
 #        return x + self.bias
 
-
-
 # Self attention is Taken from https://gist.github.com/sthalles/507ce723226274db8097c24c5359d88a
-class SelfAttention(Layer):
+class _SelfAttention(Layer):
     def __init__(self, number_of_filters, **kwargs):
         super(SelfAttention, self).__init__(**kwargs)
         self.number_of_filters = number_of_filters
@@ -334,3 +331,55 @@ class SelfAttention(Layer):
         config = {'number_of_filters': self.number_of_filters}
         base_config = super(SelfAttention, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
+
+class SelfAttention(Layer):
+    def __init__(self, channels, kernel_initializer='he_normal', **kwargs):
+        super(SelfAttention, self).__init__(**kwargs)
+        self.channels = channels
+        self.filters_f_g = self.channels // 8
+        self.filters_h = self.channels
+        self.kernel_initializer = kernel_initializer
+
+    def build(self, input_shape):
+        kernel_shape_f_g = (1, 1) + (self.channels, self.filters_f_g)
+        kernel_shape_h   = (1, 1) + (self.channels, self.filters_h)
+
+        # Create a trainable weight variable for this layer:
+        self.gamma = self.add_weight(name='gamma', shape=[1],    initializer='zeros', trainable=True)
+        self.kernel_f = self.add_weight(shape=kernel_shape_f_g,  initializer=self.kernel_initializer, name='kernel_f')
+        self.kernel_g = self.add_weight(shape=kernel_shape_f_g,  initializer=self.kernel_initializer, name='kernel_g')
+        self.kernel_h = self.add_weight(shape=kernel_shape_h,    initializer=self.kernel_initializer, name='kernel_h')
+        self.bias_f = self.add_weight(shape=(self.filters_f_g,), initializer='zeros', name='bias_f')
+        self.bias_g = self.add_weight(shape=(self.filters_f_g,), initializer='zeros', name='bias_g')
+        self.bias_h = self.add_weight(shape=(self.filters_h,),   initializer='zeros', name='bias_h')
+
+        # Set input spec.
+        self.input_spec = InputSpec(ndim=4, axes={3: input_shape[-1]})
+        super(SelfAttention, self).build(input_shape)
+
+    def call(self, x):
+        def hw_flatten(x):
+            x_shape = K.shape(x)
+            return K.reshape(x, shape=[x_shape[0], x_shape[1] * x_shape[2], x_shape[-1]])
+
+        f = K.conv2d(x, kernel=self.kernel_f, strides=(1, 1), padding='same')  # [bs, h, w, c']
+        f = K.bias_add(f, self.bias_f)
+        g = K.conv2d(x, kernel=self.kernel_g, strides=(1, 1), padding='same')  # [bs, h, w, c']
+        g = K.bias_add(g, self.bias_g)
+        h = K.conv2d(x, kernel=self.kernel_h, strides=(1, 1), padding='same')  # [bs, h, w, c]
+        h = K.bias_add(h, self.bias_h)
+
+        s = tf.matmul(hw_flatten(g), hw_flatten(f), transpose_b=True)  # # [bs, N, N]
+
+        beta = K.softmax(s, axis=-1)  # attention map
+
+        o = K.batch_dot(beta, hw_flatten(h))  # [bs, N, C]
+
+        o = K.reshape(o, shape=K.shape(x))  # [bs, h, w, C]
+        x += self.gamma * o
+
+        return x
+
+    def compute_output_shape(self, input_shape):
+        return input_shape

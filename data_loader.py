@@ -30,6 +30,9 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
         for cur, dirs, files in os.walk(path):
             if not files:
                 continue
+            if j == num_video:
+                j = 0
+                break
             path_to_lndmk_dir = cur
             path_to_frame_dir = cur.replace('lndmks', 'frames')
             frame_path = os.path.join(path_to_frame_dir, files[0])
@@ -43,6 +46,8 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
             lndmk.append(lndmk_array)
             frames_embedding_paths = [os.path.join(path_to_frame_dir, f) for f in files[1:]]
             lndmks_embedding_paths = [os.path.join(path_to_lndmk_dir, f) for f in files[1:]]
+            if len(lndmks_embedding_paths) < 4:
+                continue
             frames_embedding_list = [imageio.imread(path) for path in frames_embedding_paths]
             lndmks_embedding_list = [imageio.imread(path) for path in lndmks_embedding_paths]
             if output_shape:
@@ -60,7 +65,6 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
             if meta:
                 condition.append(j)
                 j += 1
-
             if len(frame) == batch_size:
                 frame_temp = np.array(frame) / 127.5 - 1
                 lndmk_temp = np.array(lndmk) / 127.5 - 1
@@ -80,7 +84,7 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
-    for f, l, fs, ls, c in flow_from_dir(path, num_video=1000):
-        print(f, l, fs, ls, c)
+    for f, l, fs, ls, c in flow_from_dir(path, num_video=100):
+        print(np.where(c==1.))
         
     

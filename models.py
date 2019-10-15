@@ -24,7 +24,7 @@ class GAN:
         shortcut = x
  
         x = LeakyReLU(alpha=0.2)(x)
-        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
+        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same',)(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
         x = LeakyReLU(alpha=0.2, name=act_name)(x)
@@ -240,3 +240,17 @@ class GAN:
             )
 
         return combined, discriminator
+
+if __name__ == '__main__':
+    import numpy as np
+    from keras.optimizers import Adam
+    g = GAN((256,256,3),100,8)
+    gen = g.build_generator()
+    emb = g.build_embedder()
+    edg = emb.predict([np.random.uniform(-1, 1, (4, 256, 256, 24)), np.random.uniform(-1, 1, (4, 256, 256, 24))])
+    gen.compile(loss='mse', optimizer=Adam())
+    geninput = [np.random.uniform(-1, 1, (4, 256, 256, 3)), edg]
+    genoutput = gen.predict_on_batch(geninput)
+    print(genoutput)
+    print(gen.train_on_batch(geninput, genoutput))
+    import sys;sys.exit()
