@@ -31,6 +31,7 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
             if not files:
                 continue
             if j == num_video:
+                print('iteration ends')
                 j = 0
                 break
             path_to_lndmk_dir = cur
@@ -57,8 +58,8 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
             lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
             # augmente to 8 frames
             if frames_embedding_arr.shape[-1] < 8 * 3:
-                frames_embedding_arr = np.concatenate(frames_embedding_arr, frames_embedding_arr[:, :, ::-1, :], axis=-1)[:, :, :, :k * 3]
-                lndmks_embedding_arr = np.concatenate(lndmks_embedding_arr, lndmks_embedding_arr[:, :, ::-1, :], axis=-1)[:, :, :, :k * 3]
+                frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
+                lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
                 
             frames_embedding.append(frames_embedding_arr)
             lndmks_embedding.append(lndmks_embedding_arr)
@@ -84,7 +85,8 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
-    for f, l, fs, ls, c in flow_from_dir(path, num_video=100):
-        print(np.where(c==1.))
+    for f, l, fs, ls, c in flow_from_dir(path, num_video=145000):
+        pass
+
         
     
