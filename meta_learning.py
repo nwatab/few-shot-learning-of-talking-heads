@@ -1,4 +1,3 @@
-import keras
 from keras.applications.vgg19 import VGG19
 import keras.backend as K
 from keras.engine import Model
@@ -75,18 +74,26 @@ def meta_learn():
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     with tf.device("/cpu:0"):
-        combined, discriminator = gan.build_models()
+        combined, discriminator = gan.build_models(meta=True)
     discriminator.trainable = True
+    print('==== discriminator ===')
+    discriminator.summary(print_fn=logging.info)
+    print('=== generator ===')
+    combined.get_layer('generator').summary(print_fn=logging.info)
+    print('=== embedder ===')
+    combined.get_layer('embedder').summary(print_fn=logging.info)
+
+    # 4 GPUs
     parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
-#    parallel_discriminator = discriminator
-    parallel_discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=0.0001))
+    parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
+    print('=== combined ===')
+    combined.summary(print_fn=logging.info)
     parallel_combined = multi_gpu_model(combined, gpus=4)
-#    parallel_combined = combined
     parallel_combined.compile(
         loss=[
             perceptual_loss,
-            'hinge',
+            hinge_loss,
             'mae',  # Embedding match loss
             'mae',  # Feature matching 1-7 below
             'mae',
@@ -108,10 +115,6 @@ def meta_learn():
             1e1],
         optimizer=Adam(lr=5e-5, beta_1=0.001),
     )
-    discriminator.summary(print_fn=logging.info)
-    combined.get_layer('generator').summary(print_fn=logging.info)
-    combined.get_layer('embedder').summary(print_fn=logging.info)
-    combined.summary(print_fn=logging.info)
 
     discriminator_fms = Model(discriminator.get_input_at(0),
                               [discriminator.get_layer('W_i').output,
@@ -135,7 +138,8 @@ def meta_learn():
         logging.info(('Epoch: ', epoch))
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
             valid = np.ones((frames.shape[0], 1))
-            invalid = np.zeros((frames.shape[0], 1))
+#            invalid = np.zeros((frames.shape[0], 1))
+            invalid = - valid
             
             fake_frames, *_ = combined.predict_on_batch([landmarks, embedding_frames, embedding_landmarks, condition])
             w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition])
@@ -152,7 +156,7 @@ def meta_learn():
                 [fake_frames, landmarks, condition],
                 [invalid]
             )
-            logging.info((epoch, batch_ix, g_loss, (d_loss_real + d_loss_fake) / 2))
+            logging.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
         print()
 
         # Save whole model
