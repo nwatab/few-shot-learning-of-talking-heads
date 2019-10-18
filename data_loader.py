@@ -31,13 +31,18 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
             if not files:
                 continue
             if j == num_video:
-                print('iteration ends')
+                print('End of iteration')
                 j = 0
                 break
             path_to_lndmk_dir = cur
             path_to_frame_dir = cur.replace('lndmks', 'frames')
             frame_path = os.path.join(path_to_frame_dir, files[0])
             lndmk_path = os.path.join(path_to_lndmk_dir, files[0])
+            frames_embedding_paths = [os.path.join(path_to_frame_dir, f) for f in files[1:]]
+            lndmks_embedding_paths = [os.path.join(path_to_lndmk_dir, f) for f in files[1:]]
+            if len(lndmks_embedding_paths) < k // 2:
+                # Not enough embedding input is ready
+                continue
             frame_array = imageio.imread(frame_path)
             lndmk_array = imageio.imread(lndmk_path)
             if output_shape:
@@ -45,10 +50,6 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 lndmk_array = skimage.transform.resize(lndmk_array, output_shape)
             frame.append(frame_array)
             lndmk.append(lndmk_array)
-            frames_embedding_paths = [os.path.join(path_to_frame_dir, f) for f in files[1:]]
-            lndmks_embedding_paths = [os.path.join(path_to_lndmk_dir, f) for f in files[1:]]
-            if len(lndmks_embedding_paths) < 4:
-                continue
             frames_embedding_list = [imageio.imread(path) for path in frames_embedding_paths]
             lndmks_embedding_list = [imageio.imread(path) for path in lndmks_embedding_paths]
             if output_shape:
@@ -56,7 +57,7 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 lndmks_embedding_list = [skimage.transform.resize(img, output_shape) for img in lndmks_embedding_list]
             frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
             lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
-            # augmente to 8 frames
+            # augmente to 8 frames if embedding input is not enough
             if frames_embedding_arr.shape[-1] < 8 * 3:
                 frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
                 lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
@@ -72,6 +73,7 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 frames_embedding_temp = np.array(frames_embedding) / 127.5 - 1
                 lndmks_embedding_temp = np.array(lndmks_embedding) / 127.5 - 1
                 if meta:
+#                    condition_temp = np.eye(num_video)[condition]
                     condition_temp = utils.to_categorical(condition, num_classes=num_video)
                     condition = []
                 frame = []
@@ -85,8 +87,9 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
-    for f, l, fs, ls, c in flow_from_dir(path, num_video=145000):
-        pass
+    for f, l, fe, le, c in flow_from_dir(path, num_video=145000, batch_size=12):
+        print(f.shape, l.shape, fe.shape, le.shape, c.shape)
+
 
         
     
