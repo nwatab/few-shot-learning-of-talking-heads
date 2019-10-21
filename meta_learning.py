@@ -18,7 +18,8 @@ import os
 LOG_FILE = 'logs/meta_learning.log'
 if os.path.exists(LOG_FILE):
     os.remove(LOG_FILE)
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO)
+fmt = "%(asctime)s - %(levelname)s: %(message)s"
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=fmt)
 
 def hinge_loss(y_true, y_pred):
     """ y_true = 1 (True) or -1 (Fake) """
@@ -76,18 +77,18 @@ def meta_learn():
     with tf.device("/cpu:0"):
         combined, discriminator = gan.build_models(meta=True)
     discriminator.trainable = True
-    print('==== discriminator ===')
+    logging.info('==== discriminator ===')
     discriminator.summary(print_fn=logging.info)
-    print('=== generator ===')
+    logging.info('=== generator ===')
     combined.get_layer('generator').summary(print_fn=logging.info)
-    print('=== embedder ===')
+    logging.info('=== embedder ===')
     combined.get_layer('embedder').summary(print_fn=logging.info)
 
     # 4 GPUs
     parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
     parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
-    print('=== combined ===')
+    logging.info('=== combined ===')
     combined.summary(print_fn=logging.info)
     parallel_combined = multi_gpu_model(combined, gpus=4)
     parallel_combined.compile(
@@ -127,23 +128,15 @@ def meta_learn():
                                discriminator.get_layer('fm7').output]
     )
     get_discriminator_fms = discriminator_fms.predict
-#    discriminator_embedding = Model(discriminator.get_input_at(0), discriminator.get_layer('W_i').output)
-#    get_discriminator_embedding = discriminator_embedding.predict
-
-#    valid = np.ones((BATCH_SIZE, 1))
-#    invalid = -1. *  np.ones((BATCH_SIZE, 1))
-#    invalid = np.zeros((BATCH_SIZE, 1))
     
     for epoch in range(epochs):
         logging.info(('Epoch: ', epoch))
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
             valid = np.ones((frames.shape[0], 1))
-#            invalid = np.zeros((frames.shape[0], 1))
             invalid = - valid
             
             fake_frames, *_ = combined.predict_on_batch([landmarks, embedding_frames, embedding_landmarks, condition])
             w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, condition])
-#            w = get_discriminator_embedding([frames, landmarks, condition])
             g_loss = parallel_combined.train_on_batch(
                 [landmarks, embedding_frames, embedding_landmarks, condition],
                 [frames, valid, w, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7]
@@ -157,17 +150,18 @@ def meta_learn():
                 [invalid]
             )
             logging.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
+
+            if batch_ix % 1000 == 0:
+                # Save whole model
+                combined.save('trained_models/{}_meta_combined.h5'.format(epoch))
+                discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
+
+                # Save weights only
+                combined.save_weights('trained_models/{}_meta_combined_weights.h5'.format(epoch))
+                combined.get_layer('generator').save_weights('trained_models/{}_meta_generator_in_combined.h5'.format(epoch))
+                combined.get_layer('embedder').save_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(epoch))
+                discriminator.save_weights('trained_models/{}_meta_discriminator_weights.h5'.format(epoch))
         print()
-
-        # Save whole model
-        combined.save('trained_models/{}_meta_combined.h5'.format(epoch))
-        discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
-
-        # Save weights only
-        combined.save_weights('trained_models/{}_meta_combined_weights.h5'.format(epoch))
-        combined.get_layer('generator').save_weights('trained_models/{}_meta_generator_in_combined.h5'.format(epoch))
-        combined.get_layer('embedder').save_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(epoch))
-        discriminator.save_weights('trained_models/{}_meta_discriminator_weights.h5'.format(epoch))
     
 if __name__ == '__main__':
     meta_learn()
