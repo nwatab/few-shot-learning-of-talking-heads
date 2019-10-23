@@ -57,8 +57,9 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 lndmks_embedding_list = [skimage.transform.resize(img, output_shape) for img in lndmks_embedding_list]
             frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
             lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
-            # augmente to 8 frames if embedding input is not enough
-            if frames_embedding_arr.shape[-1] < 8 * 3:
+            # augmente to k frames if embedding input is not enough
+            print(frames_embedding_arr.shape[-1], k*3)
+            if frames_embedding_arr.shape[-1] > k * 3:
                 frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
                 lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
                 
@@ -87,8 +88,9 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
-    for f, l, fe, le, c in flow_from_dir(path, num_video=145000, batch_size=12):
-        print(f.shape, l.shape, fe.shape, le.shape, c.shape)
+    path = './datasets/fewshot/monalisa/lndmks'
+    for f, l, fe, le in flow_from_dir(path, num_video=145000, batch_size=1, k=1, meta=False):
+        print(f.shape, l.shape, fe.shape, le.shape)
 
 
         
