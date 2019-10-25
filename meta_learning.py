@@ -15,11 +15,6 @@ from models import GAN
 import logging
 import os
 
-LOG_FILE = 'logs/meta_learning.log'
-if os.path.exists(LOG_FILE):
-    os.remove(LOG_FILE)
-fmt = "%(asctime)s - %(levelname)s: %(message)s"
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=fmt)
 
 def hinge_loss(y_true, y_pred):
     """ y_true = 1 (True) or -1 (Fake) """
@@ -77,19 +72,19 @@ def meta_learn():
     with tf.device("/cpu:0"):
         combined, discriminator = gan.build_models(meta=True)
     discriminator.trainable = True
-    logging.info('==== discriminator ===')
-    discriminator.summary(print_fn=logging.info)
-    logging.info('=== generator ===')
-    combined.get_layer('generator').summary(print_fn=logging.info)
-    logging.info('=== embedder ===')
-    combined.get_layer('embedder').summary(print_fn=logging.info)
+    logger.info('==== discriminator ===')
+    discriminator.summary(print_fn=logger.info)
+    logger.info('=== generator ===')
+    combined.get_layer('generator').summary(print_fn=logger.info)
+    logger.info('=== embedder ===')
+    combined.get_layer('embedder').summary(print_fn=logger.info)
 
     # 4 GPUs
     parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
     parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
     discriminator.trainable = False
-    logging.info('=== combined ===')
-    combined.summary(print_fn=logging.info)
+    logger.info('=== combined ===')
+    combined.summary(print_fn=logger.info)
     parallel_combined = multi_gpu_model(combined, gpus=4)
     parallel_combined.compile(
         loss=[
@@ -130,8 +125,10 @@ def meta_learn():
     get_discriminator_fms = discriminator_fms.predict
     
     for epoch in range(epochs):
-        logging.info(('Epoch: ', epoch))
+        logger.info(('Epoch: ', epoch))
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
+            if batch_ix == num_batches:
+                break
             valid = np.ones((frames.shape[0], 1))
             invalid = - valid
             
@@ -149,7 +146,7 @@ def meta_learn():
                 [fake_frames, landmarks, condition],
                 [invalid]
             )
-            logging.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
+            logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
 
             if batch_ix % 1000 == 0:
                 # Save whole model
@@ -164,4 +161,8 @@ def meta_learn():
         print()
     
 if __name__ == '__main__':
+    LOG_FILE = 'logs/meta_learning.log'
+    fmt = "%(asctime)s:%(levelname)s:%(name)s: %(message)s"
+    logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=fmt)
+    logger = logging.getLogger(__name__)
     meta_learn()

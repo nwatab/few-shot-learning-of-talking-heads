@@ -130,8 +130,11 @@ class GAN:
         single_embedder = self.embed(name='single_embedder')
         embedding_vectors = [single_embedder([frame, landmark]) for frame, landmark in zip(input_frames_splt, input_landmarks_splt)] # List of (BATCH_SIZE, 512,)
         embedding_vectors = [Lambda(lambda x: K.expand_dims(x, axis=1))(vector) for vector in embedding_vectors]  # List of (BATCH_SIZE, 1, 512)
-        embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
-        embedder_embedding = GlobalAveragePooling1D(name='embedder_embedding')(embeddings)
+        if self.k == 1:
+            embeddings = embedding_vectors[0]
+        else:
+            embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
+        embedder_embedding = GlobalAveragePooling1D(name='embedder_embedding')(embeddings)  # (BATCH_SIZE, 512)
         
         embedder = Model(inputs=[input_frames, input_landmarks], outputs=embedder_embedding, name='embedder')
         return embedder
