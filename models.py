@@ -1,8 +1,11 @@
+from keras.applications.vgg19 import VGG19
 import keras.backend as K
 from keras.layers import Add, Input, LeakyReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
 from keras.layers.core import Activation
 from keras.models import Model
+from keras.optimizers import Adam
 from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
+from keras_vggface.vggface import VGGFace
 import tensorflow as tf
 
 from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttention
@@ -28,7 +31,6 @@ class GAN:
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
         x = LeakyReLU(alpha=0.2, name=act_name)(x)
-        act = x
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
         if instance_normalization:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
@@ -38,8 +40,6 @@ class GAN:
         shortcut = AveragePooling2D(pool_size=(2, 2))(shortcut)
 
         x = Add()([x, shortcut])
-        if act_name:
-            return x, act
         return x
 
     def resblock(self, x, channels):
@@ -143,14 +143,14 @@ class GAN:
         landmarks = Input(shape=self.input_shape, name='landmarks')
         style_embedding = Input(shape=(512,), name='style_embedding')
 
-        hid, fm7 = self.downsample(landmarks, 64, instance_normalization=True, act_name='fm7')
-        hid, fm6 = self.downsample(hid, 128, instance_normalization=True, act_name='fm6')
-        hid, fm5 = self.downsample(hid, 256, instance_normalization=True, act_name='fm5')
+        hid = self.downsample(landmarks, 64, instance_normalization=True)
+        hid = self.downsample(hid, 128, instance_normalization=True)
+        hid = self.downsample(hid, 256, instance_normalization=True)
         hid = SelfAttention(256)(hid)
-        hid, fm4 = self.downsample(hid, 256, instance_normalization=True, act_name='fm4')
-        hid, fm3 = self.downsample(hid, 256, instance_normalization=True, act_name='fm3')
-        hid, fm2 = self.downsample(hid, 256, instance_normalization=True, act_name='fm2')
-        hid, fm1 = self.downsample(hid, 512, instance_normalization=True, act_name='fm1')
+        hid = self.downsample(hid, 256, instance_normalization=True)
+        hid = self.downsample(hid, 256, instance_normalization=True)
+        hid = self.downsample(hid, 256, instance_normalization=True)
+        hid = self.downsample(hid, 512, instance_normalization=True)
  #       hid = ZeroPadding2D(padding=((0, 1),(0, 1)))(hid)  # For input size is 224p
         
         hid = self.resblock(hid, 512)
@@ -170,7 +170,7 @@ class GAN:
 
         generator = Model(
             inputs=[landmarks, style_embedding],
-            outputs=[fake_frame, fm1, fm2, fm3, fm4, fm5, fm6, fm7],
+            outputs=[fake_frame],
             name='generator')
         return generator
     
@@ -182,14 +182,14 @@ class GAN:
         input_frame = Input(shape=self.input_shape, name='frames')
         input_landmark = Input(shape=self.input_shape, name='landmarks')
         inputs = Concatenate()([input_frame, input_landmark])
-        hid, fm7 = self.downsample(inputs, 64, act_name='fm7')
-        hid, fm6 = self.downsample(hid, 128, act_name='fm6')
-        hid, fm5 = self.downsample(hid, 256, act_name='fm5')
+        hid = self.downsample(inputs, 64, act_name='fm7')
+        hid = self.downsample(hid, 128, act_name='fm6')
+        hid = self.downsample(hid, 256, act_name='fm5')
         hid = SelfAttention(256)(hid)
-        hid, fm4 = self.downsample(hid, 256, act_name='fm4')
-        hid, fm3 = self.downsample(hid, 256, act_name='fm3')
-        hid, fm2 = self.downsample(hid, 256, act_name='fm2')
-        hid, fm1 = self.downsample(hid, 512, act_name='fm1')
+        hid = self.downsample(hid, 256, act_name='fm4')
+        hid = self.downsample(hid, 256, act_name='fm3')
+        hid = self.downsample(hid, 256, act_name='fm2')
+        hid = self.downsample(hid, 512, act_name='fm1')
         hid = Activation('relu')(hid)
         v = GlobalSumPooling2D()(hid)
 
@@ -214,46 +214,111 @@ class GAN:
         )
         return discriminator
 
-    def build_models(self, meta=True):
+    def _build_embedding_discriminator_model(self, discriminator):
+        self.embedding_discriminator = Model(discriminator.get_layer('condition').input, discriminator.get_layer('W_i').output, name='embedding_discriminator')
+        return self.embedding_discriminator
+
+    def _build_intermediate_discriminator_model(self, discriminator):
+        layer_names = ['fm{}'.format(i) for i in range(1, 8)]
+        fm_outputs = [discriminator.get_layer(layer_name).output for layer_name in layer_names]
+        self.intermediate_discriminator = Model(discriminator.input[:2], fm_outputs, name='intermediate_discriminator')
+        return self.intermediate_discriminator
+        
+    def compile_models(self, meta, gpus=1):
+        hinge_loss='mse'
+        # Compile discriminator
+        discriminator = self.build_discriminator(meta)
+        discriminator.trainable = True
+        if gpus > 1:
+            parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
+            parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=1e-5))
+        else:
+            discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=1e-5))
+
+        # Compile Combined model to train generator
         embedder = self.build_embedder()
         generator = self.build_generator()
-        discriminator = self.build_discriminator(meta)
+        intermediate_discriminator = self._build_intermediate_discriminator_model(discriminator)
+        self._build_embedding_discriminator_model(discriminator)
+        intermediate_vgg19 = self.build_intermediate_vgg19_model()
+        intermediate_vggface = self.build_intermediate_vggface_model()
+        discriminator.trainable = False
+        intermediate_discriminator.trainable = False
+        intermediate_vgg19.trainable = False
+        intermediate_vggface.trainable = False
 
-        # Generator Input
         input_lndmk = Input(shape=self.input_shape, name='landmarks')
         input_embedder_frames = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_frames')
         input_embedder_lndmks = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_lndmks')
         
         embedder_embedding = embedder([input_embedder_frames, input_embedder_lndmks])
-        fake_frame, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7 = generator([input_lndmk, embedder_embedding])
+        fake_frame = generator([input_lndmk, embedder_embedding])
+        intermediate_vgg19_outputs = intermediate_vgg19(fake_frame)
+        intermediate_vggface_outputs = intermediate_vggface(fake_frame)
+        intermediate_discriminator_outputs = intermediate_discriminator([fake_frame, input_lndmk])
         if meta:
             condition = Input(shape=(self.num_videos,), name='condition')
             realicity = discriminator([fake_frame, input_lndmk, condition])
             combined = Model(
-                inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
-                outputs=[fake_frame, realicity, embedder_embedding, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
-                name='combined'
-            )
+                inputs = [input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
+                outputs = intermediate_vgg19_outputs + intermediate_vggface_outputs + [realicity] + intermediate_discriminator_outputs + [embedder_embedding],
+                name = 'combined'
+                )
+            loss_weights = [1.5e-1] * len(intermediate_vgg19_outputs) + [2.5e-2] * len(intermediate_vggface_outputs) + [10] + [10] * len(intermediate_discriminator_outputs) + [10]
         else:
             realicity = discriminator([fake_frame, input_lndmk, embedder_embedding])
             combined = Model(
-                inputs=[input_lndmk, input_embedder_frames, input_embedder_lndmks],
-                outputs=[fake_frame, realicity, g_fm1, g_fm2, g_fm3, g_fm4, g_fm5, g_fm6, g_fm7],
-                name='combined'
+                inputs = [input_lndmk, input_embedder_frames, input_embedder_lndmks],
+                outputs = intermediate_vgg19_outputs + intermediate_vggface_outputs + [realicity] + intermediate_discriminator_outputs,
+                name = 'combined'
+            )
+            loss_weights = [1.5e-1] * len(intermediate_vgg19_outputs) + [2.5e-2] * len(intermediate_vggface_outputs) + [10] + [10] * len(intermediate_discriminator_outputs)
+
+        self.embedder = embedder
+        self.generator = generator
+        self.combined = combined
+        self.discriminator = discriminator
+
+        if gpus > 1:
+            parallel_combined = multi_gpu_model(combined, gpus=4)
+            parallel_combined.compile(
+                loss='mae',
+                loss_weights=loss_weights,
+                optimizer=Adam(lr=5e-5, beta_1=1e-5)
             )
 
-        return combined, discriminator
+            self.parallel_combined = parallel_combined
+            self.parallel_discriminator = parallel_discriminator
+
+            return parallel_combined, parallel_discriminator, combined, discriminator
+        else:
+            combined.compile(
+                loss='mae',
+                loss_weights=loss_weights,
+                optimizer=Adam(lr=5e-5, beta_1=1e-5)
+            )
+            return combined, combined, discriminator, discriminator
+
+    def build_intermediate_vgg19_model(self):
+        vgg19 = VGG19(input_shape=self.input_shape, weights='imagenet', include_top=False)
+        vgg19.trainable = False
+        # Paper says Conv1, 6, 11, 20, 29 VGG19 layers but it isn't clear which layer is which layer
+        layer_names = ['block1_conv2', 'block2_conv2', 'block3_conv4', 'block4_conv4', 'block5_conv4']
+        intermediate_outputs = [vgg19.get_layer(layer_name).output for layer_name in layer_names]
+        self.intermediate_vgg19 = Model(vgg19.input, intermediate_outputs, name='intermediate_vgg19')
+        return self.intermediate_vgg19
+
+    def build_intermediate_vggface_model(self):
+        vggface = VGGFace(input_shape=self.input_shape, weights='vggface', include_top=False)
+        vggface.trainable = False
+        layer_names = ['conv1_2', 'conv2_2', 'conv3_3', 'conv4_3', 'conv5_3']
+        intermediate_outputs = [vggface.get_layer(layer_name).output for layer_name in layer_names]
+        self.intermediate_vggface = Model(vggface.input, intermediate_outputs, name='intermediate_vggface')
+        return self.intermediate_vggface
 
 if __name__ == '__main__':
     import numpy as np
     from keras.optimizers import Adam
     g = GAN((256,256,3),100,8)
-    gen = g.build_generator()
-    emb = g.build_embedder()
-    edg = emb.predict([np.random.uniform(-1, 1, (4, 256, 256, 24)), np.random.uniform(-1, 1, (4, 256, 256, 24))])
-    gen.compile(loss='mse', optimizer=Adam())
-    geninput = [np.random.uniform(-1, 1, (4, 256, 256, 3)), edg]
-    genoutput = gen.predict_on_batch(geninput)
-    print(genoutput)
-    print(gen.train_on_batch(geninput, genoutput))
-    import sys;sys.exit()
+#    g.build_intermediate_vgg19_model()
+    g.compile_models()
