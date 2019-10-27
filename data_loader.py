@@ -34,6 +34,8 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 print('End of iteration')
                 j = 0
                 break
+            if '.DS_Store' in files:
+                files.remove('.DS_Store')
             path_to_lndmk_dir = cur
             path_to_frame_dir = cur.replace('lndmks', 'frames')
             frame_path = os.path.join(path_to_frame_dir, files[0])
