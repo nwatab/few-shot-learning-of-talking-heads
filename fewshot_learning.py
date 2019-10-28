@@ -26,82 +26,52 @@ def fewshot_learn():
     epochs = 40
     dataname = 'monalisa'
     datapath = './datasets/fewshot/' + dataname + '/lndmks'
+
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     with tf.device("/cpu:0"):
-        combined, discriminator = gan.build_models(meta=False)
+        combined_to_train, combined, discriminator_to_train, discriminator = gan.compile_models(meta=True, gpus=0)
+        embedder = gan.embedder
+        generator = gan.generator
+        intermediate_vgg19 = gan.intermediate_vgg19
+        intermediate_vggface = gan.intermediate_vggface
+        intermediate_discriminator = gan.intermediate_discriminator
+        embedding_discriminator = gan.embedding_discriminator
 
-    # Load meta-learned weights
-    # discriminator in combined also initialized with trained weights
-    discriminator.load_weights('trained_models/{}_meta_discriminator_weights.h5'.format(metalearning_epoch), by_name=True, skip_mismatch=True)
-    combined.get_layer('embedder').load_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(metalearning_epoch))
-    combined.get_layer('generator').load_weights('trained_models/{}_meta_generator_in_combined.h5'.format(metalearning_epoch))
-
-    discriminator_fms_model = Model(discriminator.get_input_at(0),
-                              [discriminator.get_layer('fm1').output,
-                               discriminator.get_layer('fm2').output,
-                               discriminator.get_layer('fm3').output,
-                               discriminator.get_layer('fm4').output,
-                               discriminator.get_layer('fm5').output,
-                               discriminator.get_layer('fm6').output,
-                               discriminator.get_layer('fm7').output]
-    )
-    get_discriminator_fms = discriminator_fms_model.predict
-    embedder_embedding_model = Model(combined.get_layer('embedder').get_input_at(0), combined.get_layer('embedder').get_layer('embedder_embedding').output)
-    get_embedder_embedding = embedder_embedding_model.predict
-    
-    discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=0.0001))
+    logger.info('==== discriminator ===')
     discriminator.summary(print_fn=logger.info)
-    discriminator.trainable = False
-    combined.compile(
-        loss=[
-            perceptual_loss,
-            hinge_loss,
-            'mae',  # Embedding match loss
-            'mae',  # Feature matching 1-7 below
-            'mae',
-            'mae',
-            'mae',
-            'mae',
-            'mae'],
-        loss_weights=[
-            1e0,  # VGG19 and VGG Face loss is summed up in loss function
-            1e0,  # hinge loss
-            1e1,  # Feature matching 1-7 below
-            1e1,
-            1e1,
-            1e1,
-            1e1,
-            1e1,
-            1e1],
-        optimizer=Adam(lr=5e-5, beta_1=0.001),
-    )
-    combined.summary(print_fn=logger.info)
-    combined.get_layer('embedder').summary(print_fn=logger.info)
+    logger.info('=== generator ===')
     combined.get_layer('generator').summary(print_fn=logger.info)
+    logger.info('=== embedder ===')
+    combined.get_layer('embedder').summary(print_fn=logger.info)
     
     for epoch in range(epochs):
         for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k, meta=False)):
+
             if batch_ix == num_batches:
                 break
-            valid = np.ones((frames.shape[0], 1))
+            valid = - np.ones((frames.shape[0], 1))
             invalid = - valid
-            fake_frames, *_ = combined.predict([landmarks, embedding_frames, embedding_landmarks])
-            embedder_embedding =  get_embedder_embedding([embedding_frames, embedding_landmarks])
-            d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7 = get_discriminator_fms([frames, landmarks, embedder_embedding])
+
+            intermediate_vgg19_outputs = intermediate_vgg19.predict(frames)
+            intermediate_vggface_outputs =intermediate_vggface.predict(frames)
+            intermediate_discriminator_outputs = intermediate_discriminator.predict([frames, landmarks])
+            w_i = embedding_discriminator.predict(condition)
+
+            fake_frames = generator.predict([landmarks, w_i])
             
-            g_loss = combined.train_on_batch(
-                [landmarks, embedding_frames, embedding_landmarks],
-                [frames, valid, d_fm1, d_fm2, d_fm3, d_fm4, d_fm5, d_fm6, d_fm7]
+            g_loss = combined_to_train.train_on_batch(
+                [landmarks, embedding_frames, embedding_landmarks, condition],
+                intermediate_vgg19_outputs + intermediate_vggface_outputs + [valid] + intermediate_discriminator_outputs + [w_i]
             )
-            d_loss_real = discriminator.train_on_batch(
-                [frames, landmarks, embedder_embedding],
+            d_loss_real = discriminator_to_train.train_on_batch(
+                [frames, landmarks, condition],
                 [valid]
             )
-            d_loss_fake = discriminator.train_on_batch(
-                [fake_frames, landmarks, embedder_embedding],
+            d_loss_fake = discriminator_to_train.train_on_batch(
+                [fake_frames, landmarks, condition],
                 [invalid]
             )
-        logger.info((epoch, g_loss, (d_loss_real, d_loss_fake)))
+        logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
 
     # Save whole model
     combined.save('trained_models/{}_fewshot_combined.h5'.format(dataname))
