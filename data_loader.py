@@ -5,7 +5,7 @@ from keras import utils
 import numpy as np
 
 
-def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=True):
+def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=8, meta=True):
     """
     params:
     output_shape: (H, W)
@@ -16,8 +16,8 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
     lndmks_embedding: [BATCH_SIZE, H, W, 8 * C]
 
     """
-    if not os.path.exists(path):
-        raise Exception(path, 'does not exist.')
+    if not os.path.exists(landmark_path):
+        raise Exception(landmark_path, 'does not exist.')
         import sys
         sys.exist()
     while True:
@@ -27,7 +27,7 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
         frames_embedding = []
         lndmks_embedding = []
         condition = []
-        for cur, dirs, files in os.walk(path):
+        for cur, dirs, files in os.walk(landmark_path):
             if not files:
                 continue
             if j == num_video:
@@ -36,15 +36,17 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 break
             if '.DS_Store' in files:
                 files.remove('.DS_Store')
+            if len(files[1:]) < k // 2:
+                # Lacking embedding input. if k // 2 <=  len(files[1:]) < k, then augment later
+                continue
             path_to_lndmk_dir = cur
             path_to_frame_dir = cur.replace('lndmks', 'frames')
             frame_path = os.path.join(path_to_frame_dir, files[0])
             lndmk_path = os.path.join(path_to_lndmk_dir, files[0])
+
             frames_embedding_paths = [os.path.join(path_to_frame_dir, f) for f in files[1:]]
             lndmks_embedding_paths = [os.path.join(path_to_lndmk_dir, f) for f in files[1:]]
-            if len(lndmks_embedding_paths) < k // 2:
-                # Not enough embedding input is ready
-                continue
+
             frame_array = imageio.imread(frame_path)
             lndmk_array = imageio.imread(lndmk_path)
             if output_shape:
@@ -59,18 +61,23 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 lndmks_embedding_list = [skimage.transform.resize(img, output_shape) for img in lndmks_embedding_list]
             frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
             lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
-            # augmente to k frames if embedding input is not enough
-            print(frames_embedding_arr.shape[-1], k*3)
-            if frames_embedding_arr.shape[-1] > k * 3:
-                frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
-                lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, ::-1, :]), axis=-1)[:, :, :k * 3]
-                
+            if frames_embedding_arr.shape[-1] < k * 3:
+                # augmente to k frames if embedding input is not enough
+                frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, ::-1, :]), axis=-1)
+                lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, ::-1, :]), axis=-1)
+            frames_embedding_arr = frames_embedding_arr[:, :, :k * 3]
+            lndmks_embedding_arr = lndmks_embedding_arr[:, :, :k * 3]
             frames_embedding.append(frames_embedding_arr)
             lndmks_embedding.append(lndmks_embedding_arr)
             if meta:
                 condition.append(j)
                 j += 1
             if len(frame) == batch_size:
+                if j // 12 > 152:
+                    print(len(frames_embedding))
+                    for f in frames_embedding:
+                        print(f.shape)
+                    print(np.array(frames_embedding).shape)
                 frame_temp = np.array(frame) / 127.5 - 1
                 lndmk_temp = np.array(lndmk) / 127.5 - 1
                 frames_embedding_temp = np.array(frames_embedding) / 127.5 - 1
@@ -90,10 +97,7 @@ def flow_from_dir(path, num_video, output_shape=None, batch_size=48, k=8, meta=T
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
-    path = './datasets/fewshot/monalisa/lndmks'
-    for f, l, fe, le in flow_from_dir(path, num_video=145000, batch_size=1, k=1, meta=False):
-        print(f.shape, l.shape, fe.shape, le.shape)
+#    path = './datasets/fewshot/monalisa/lndmks'
+    for batch_ix, (f, l, fe, le, c) in enumerate(flow_from_dir(path, num_video=145000, batch_size=12, k=8, meta=True)):
+        print(batch_ix, f.shape, l.shape, fe.shape, le.shape)
 
-
-        
-    
