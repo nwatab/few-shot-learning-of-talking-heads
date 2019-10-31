@@ -73,11 +73,6 @@ def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=
                 condition.append(j)
                 j += 1
             if len(frame) == batch_size:
-                if j // 12 > 152:
-                    print(len(frames_embedding))
-                    for f in frames_embedding:
-                        print(f.shape)
-                    print(np.array(frames_embedding).shape)
                 frame_temp = np.array(frame) / 127.5 - 1
                 lndmk_temp = np.array(lndmk) / 127.5 - 1
                 frames_embedding_temp = np.array(frames_embedding) / 127.5 - 1
@@ -100,4 +95,5 @@ if __name__ == '__main__':
 #    path = './datasets/fewshot/monalisa/lndmks'
     for batch_ix, (f, l, fe, le, c) in enumerate(flow_from_dir(path, num_video=145000, batch_size=12, k=8, meta=True)):
         print(batch_ix, f.shape, l.shape, fe.shape, le.shape)
+        print(f.min(), f.max(), l.min(), l.max(), fe.min(), fe.max(), le.min(), le.max())
 

@@ -34,7 +34,7 @@ def predict(lndmk_image_paths, style_frame_paths, style_lndmk_paths):
 
     style_embedding = embe.predict([style_frame_images, style_lndmk_images])
     style_embedding = style_embedding.repeat(8, axis=0)
-    fake_images, *_ = gene.predict([lndmk_images, style_embedding])
+    fake_images = gene.predict([lndmk_images, style_embedding])
     return fake_images
 
 if __name__ == '__main__':

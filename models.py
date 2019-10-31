@@ -1,6 +1,6 @@
 from keras.applications.vgg19 import VGG19
 import keras.backend as K
-from keras.layers import Add, Input, LeakyReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
+from keras.layers import Dense, Add, Input, LeakyReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
 from keras.layers.core import Activation
 from keras.models import Model
 from keras.optimizers import Adam
@@ -195,7 +195,7 @@ class GAN:
 
         if meta:
             condition = Input(shape=(self.num_videos,), name='condition')
-            W_i = DenseSN(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
+            W_i = Dense(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
         else:
             W_i  = Input(shape=(512,), name='e_NEW')
         w = Bias(name='w')(W_i)  # w = W_i + w_0
@@ -225,21 +225,20 @@ class GAN:
         return self.intermediate_discriminator
         
     def compile_models(self, meta, gpus=1):
-        hinge_loss='mse'
         # Compile discriminator
         discriminator = self.build_discriminator(meta)
         discriminator.trainable = True
         if gpus > 1:
             parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
-            parallel_discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=1e-5))
+            parallel_discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=1e-5))
         else:
-            discriminator.compile(loss=hinge_loss, optimizer=Adam(lr=2e-4, beta_1=1e-5))
+            discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=1e-5))
 
         # Compile Combined model to train generator
         embedder = self.build_embedder()
         generator = self.build_generator()
         intermediate_discriminator = self._build_intermediate_discriminator_model(discriminator)
-        self._build_embedding_discriminator_model(discriminator)
+
         intermediate_vgg19 = self.build_intermediate_vgg19_model()
         intermediate_vggface = self.build_intermediate_vggface_model()
         discriminator.trainable = False
@@ -257,6 +256,7 @@ class GAN:
         intermediate_vggface_outputs = intermediate_vggface(fake_frame)
         intermediate_discriminator_outputs = intermediate_discriminator([fake_frame, input_lndmk])
         if meta:
+            self._build_embedding_discriminator_model(discriminator)  # Call embedding discriminator when meta learning
             condition = Input(shape=(self.num_videos,), name='condition')
             realicity = discriminator([fake_frame, input_lndmk, condition])
             combined = Model(
@@ -264,7 +264,9 @@ class GAN:
                 outputs = intermediate_vgg19_outputs + intermediate_vggface_outputs + [realicity] + intermediate_discriminator_outputs + [embedder_embedding],
                 name = 'combined'
                 )
+            loss = ['mae'] * len(intermediate_vgg19_outputs) + ['mae'] * len(intermediate_vggface_outputs) + ['hinge'] + ['mae'] * len(intermediate_discriminator_outputs) + ['mae']
             loss_weights = [1.5e-1] * len(intermediate_vgg19_outputs) + [2.5e-2] * len(intermediate_vggface_outputs) + [10] + [10] * len(intermediate_discriminator_outputs) + [10]
+
         else:
             realicity = discriminator([fake_frame, input_lndmk, embedder_embedding])
             combined = Model(
@@ -272,6 +274,7 @@ class GAN:
                 outputs = intermediate_vgg19_outputs + intermediate_vggface_outputs + [realicity] + intermediate_discriminator_outputs,
                 name = 'combined'
             )
+            loss = ['mae'] * len(intermediate_vgg19_outputs) + ['mae'] * len(intermediate_vggface_outputs) + ['hinge'] + ['mae'] * len(intermediate_discriminator_outputs)
             loss_weights = [1.5e-1] * len(intermediate_vgg19_outputs) + [2.5e-2] * len(intermediate_vggface_outputs) + [10] + [10] * len(intermediate_discriminator_outputs)
 
         self.embedder = embedder
@@ -280,9 +283,9 @@ class GAN:
         self.discriminator = discriminator
 
         if gpus > 1:
-            parallel_combined = multi_gpu_model(combined, gpus=4)
+            parallel_combined = multi_gpu_model(combined, gpus=gpus)
             parallel_combined.compile(
-                loss='mae',
+                loss=loss,
                 loss_weights=loss_weights,
                 optimizer=Adam(lr=5e-5, beta_1=1e-5)
             )
@@ -291,13 +294,13 @@ class GAN:
             self.parallel_discriminator = parallel_discriminator
 
             return parallel_combined, parallel_discriminator, combined, discriminator
-        else:
-            combined.compile(
-                loss='mae',
-                loss_weights=loss_weights,
-                optimizer=Adam(lr=5e-5, beta_1=1e-5)
-            )
-            return combined, combined, discriminator, discriminator
+
+        combined.compile(
+            loss=loss,
+            loss_weights=loss_weights,
+            optimizer=Adam(lr=5e-5, beta_1=1e-5)
+        )
+        return combined, combined, discriminator, discriminator
 
     def build_intermediate_vgg19_model(self):
         vgg19 = VGG19(input_shape=self.input_shape, weights='imagenet', include_top=False)
