@@ -1,6 +1,6 @@
 from keras.applications.vgg19 import VGG19
 import keras.backend as K
-from keras.layers import Dense, Add, Input, LeakyReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
+from keras.layers import Dense, Add, Input, ReLUAveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
 from keras.layers.core import Activation
 from keras.models import Model
 from keras.optimizers import Adam
@@ -22,17 +22,17 @@ class GAN:
         self.num_videos = num_videos
         self.k = k
 
-    def downsample(self, x, channels, instance_normalization=False, act_name=None):
+    def downsample(self, x, channels, i_norm=False, act_name=None):
         """  Downsampling is similar to an implementation in BigGAN """
         shortcut = x
  
-        x = LeakyReLU(alpha=0.2)(x)
+        x = ReLU()(x)
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same',)(x)
-        if instance_normalization:
+        if i_norm:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
-        x = LeakyReLU(alpha=0.2, name=act_name)(x)
+        x = ReLU(name=act_name)(x)
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
-        if instance_normalization:
+        if i_norm:
             x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
         x = AveragePooling2D(pool_size=(2, 2))(x)
 
@@ -42,14 +42,14 @@ class GAN:
         x = Add()([x, shortcut])
         return x
 
-    def resblock(self, x, channels):
+    def resblock(self, x, channels, mean0, std0, mean1, std1):
         shortcut = x
 
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        x = InstanceNormalization(axis=-1)(x)
-        x = LeakyReLU(alpha=0.2)(x)
+        x = AdaInstanceNormalization()([x, mean0, std0])
+        x = ReLU()(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        x = InstanceNormalization(axis=-1)(x)
+        x = AdaInstanceNormalization()([x, mean1, std1])
 
         if shortcut.shape[-1] != channels:
             shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer='he_normal')(shortcut)
@@ -57,43 +57,15 @@ class GAN:
         x = Add()([x, shortcut])
         return x
 
-    def upsample(self, x, channels, style_embedding, instance_normalization=False, name='0'):
-        def adain(inputs):
-            '''
-            Borrowed from https://github.com/jonrei/tf-AdaIN
-            Normalizes the `content_features` with scaling and offset from `style_features`.
-            See "5. Adaptive Instance Normalization" in https://arxiv.org/abs/1703.06868 for details.
-            '''
-            epsilon = 1e-5
-            content_features, style_mean, style_std = inputs
-            content_mean, content_variance = tf.nn.moments(content_features, [1, 2], keep_dims=True)
-            normalized_content_features = tf.nn.batch_normalization(content_features,
-                                                                    content_mean,
-                                                                    content_variance,
-                                                                    style_mean, 
-                                                                    style_std,
-                                                                    epsilon)
-            return normalized_content_features
-
+    def upsample(self, x, channels, mean0, std0, mean1, std1):
         shortcut = x
-        style_embedding = DenseSN(512, kernel_initializer='he_normal')(style_embedding)
-        style_embedding = DenseSN(512, kernel_initializer='he_normal')(style_embedding)
-        style_mean = DenseSN(channels, name='style_mean'+name, kernel_initializer='he_normal')(style_embedding)
-        style_std  = DenseSN(channels, name='style_std'+ name, kernel_initializer='he_normal')(style_embedding)
-        style_mean = Reshape((1, 1, channels))(style_mean)
-        style_std  = Reshape((1, 1, channels))(style_std)
 
-        if instance_normalization:
-            x = InstanceNormalization(axis=-1)(x)
-        x = LeakyReLU(alpha=0.2)(x)
+        x = AdaInstanceNormalization()([x, mean0, std0])
+        x = ReLU()(x)
         x = UpSampling2D(size=(2, 2))(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        if instance_normalization:
-            x = InstanceNormalization(axis=-1)(x)
-#        x = Lambda(adain)([x, style_mean, style_std])
-#        x = AdaIN()([x, style_mean, style_std])
-        x = AdaInstanceNormalization()([x, style_mean, style_std])
-        x = LeakyReLU(alpha=0.2)(x)
+        x = AdaInstanceNormalization()([x, mean1, std1])
+        x = ReLU()(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
 
         shortcut = UpSampling2D(size=(2, 2))(shortcut)
@@ -101,26 +73,25 @@ class GAN:
 
         x = Add()([x, shortcut])
         return x
-        
 
-    def embed(self, name='embed'):
-        input_frame = Input(shape=self.input_shape)
-        input_landmark = Input(shape=self.input_shape)
-        inputs = Concatenate()([input_frame, input_landmark])
+    def build_embeder(self, name='embedder'):
+        h, w, c = self.input_shape
+        
+        input_landmark_frame = Input(shape=(h, w, c * 2))  # [:,:,3:]: landmark; [:,:,4:]: frame
         hid = self.downsample(inputs, 64)
         hid = self.downsample(hid, 128)
+        hid = self.downsample(hid, 256)
+        hid = SelfAttention(256)(hid)
         hid = self.downsample(hid, 512)
-        hid = SelfAttention(512)(hid)
         hid = self.downsample(hid, 512)
         hid = self.downsample(hid, 512)
-        hid = self.downsample(hid, 512)
-        hid = Activation('relu')(hid)
+        hid = ReLU()(hid)
         e = GlobalSumPooling2D()(hid)
 
         embedder = Model(inputs=[input_frame, input_landmark], outputs=e, name=name)
         return embedder
 
-    def build_embedder(self):
+    def build_embedder_depricated(self):
         """ k frames from the same sequence """
         input_frames = Input(shape=(self.h, self.w, self.c * self.k))
         input_landmarks = Input(shape=(self.h, self.w, self.c * self.k))
@@ -134,38 +105,81 @@ class GAN:
             embeddings = embedding_vectors[0]
         else:
             embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
-        embedder_embedding = GlobalAveragePooling1D(name='embedder_embedding')(embeddings)  # (BATCH_SIZE, 512)
+        average_embedding = GlobalAveragePooling1D(name='average_embedding')(embeddings)  # (BATCH_SIZE, 512)
         
-        embedder = Model(inputs=[input_frames, input_landmarks], outputs=embedder_embedding, name='embedder')
+        embedder = Model(inputs=[input_frames, input_landmarks], outputs=average_embedding, name='embedder')
         return embedder
 
     def build_generator(self):
         landmarks = Input(shape=self.input_shape, name='landmarks')
         style_embedding = Input(shape=(512,), name='style_embedding')
+        adain_params = DenseSN(4*(512*4+512+256+128+64+64)+3+3)(style_embedding)
+        adain_params = Reshape((1, 1, 4*(512*4+512+256+128+64)+3+3))(adain_params)
 
-        hid = self.downsample(landmarks, 64, instance_normalization=True)
-        hid = self.downsample(hid, 128, instance_normalization=True)
-        hid = self.downsample(hid, 256, instance_normalization=True)
+        # Slice AdaIN Parameters
+        mean_b00 = Lambda(lambda x: x[:,:,:, 0    : 512])(adain_params)
+        std_b00  = Lambda(lambda x: x[:,:,:, 512  : 512*2])(adain_params)
+        mean_b01 = Lambda(lambda x: x[:,:,:, 512*2:512*3])(adain_params)
+        std_b01  = Lambda(lambda x: x[:,:,:, 512*3:512*4])(adain_params)
+
+        mean_b10 = Lambda(lambda x: x[:,:,:, 512*4:512*5])(adain_params)
+        std_b10  = Lambda(lambda x: x[:,:,:, 512*5:512*6])(adain_params)
+        mean_b11 = Lambda(lambda x: x[:,:,:, 512*6:512*7])(adain_params)
+        std_b11  = Lambda(lambda x: x[:,:,:, 512*7:512*8])(adain_params)
+
+        mean_b20 = Lambda(lambda x: x[:,:,:, 512*8:512*9])(adain_params)
+        std_b20  = Lambda(lambda x: x[:,:,:, 512*9:512*10])(adain_params)
+        mean_b21 = Lambda(lambda x: x[:,:,:, 512*10:512*11])(adain_params)
+        std_b21  = Lambda(lambda x: x[:,:,:, 512*11:512*12])(adain_params)
+
+        mean_b30 = Lambda(lambda x: x[:,:,:, 512*12:512*13])(adain_params)
+        std_b30  = Lambda(lambda x: x[:,:,:, 512*13:512*14])(adain_params)
+        mean_b31 = Lambda(lambda x: x[:,:,:, 512*14:512*15])(adain_params)
+        std_b31  = Lambda(lambda x: x[:,:,:, 512*15:512*16])(adain_params)
+
+        mean_u00 = Lambda(lambda x: x[:,:,:, 512*16:512*17])(adain_params)
+        std_u00  = Lambda(lambda x: x[:,:,:, 512*17:512*18])(adain_params)
+        mean_u01 = Lambda(lambda x: x[:,:,:, 512*18:512*19])(adain_params)
+        std_u01  = Lambda(lambda x: x[:,:,:, 512*19:512*20])(adain_params)
+
+        mean_u10 = Lambda(lambda x: x[:,:,:, 512*20      :512*20+256])(adain_params)
+        std_u10  = Lambda(lambda x: x[:,:,:, 512*20+256  :512*20+256*2])(adain_params)
+        mean_u11 = Lambda(lambda x: x[:,:,:, 512*20+256*1:512*20+256*3])(adain_params)
+        std_u11  = Lambda(lambda x: x[:,:,:, 512*20+266*3:512*20+256*4])(adain_params)
+
+        mean_u20 = Lambda(lambda x: x[:,:,:, 512*20+256*4      :512*20+256*4+128])(adain_params)
+        std_u20  = Lambda(lambda x: x[:,:,:, 512*20+256*4+128  :512*20+256*4+128*2])(adain_params)
+        mean_u21 = Lambda(lambda x: x[:,:,:, 512*20+256*4+128*2:512*20+256*4+128*3])(adain_params)
+        std_u21  = Lambda(lambda x: x[:,:,:, 512*20+266*4+128*3:512*20+256*4+128*4])(adain_param)
+
+        mean_u30 = Lambda(lambda x: x[:,:,:, 512*20+256*4+128*4     :512*20+256*4+128*4+64])(adain_params)
+        std_u30  = Lambda(lambda x: x[:,:,:, 512*20+256*4+128*4+64  :512*20+256*4+128*4+64*2])(adain_params)
+        mean_u31 = Lambda(lambda x: x[:,:,:, 512*20+256*4+128*4+64*2:512*20+256*4+128*4+64*3])(adain_params)
+        std_u31  = Lambda(lambda x: x[:,:,:, 512*20+266*4+128*4+64*3:512*20+256*4+128*4+64*4])(adain_param)
+
+        mean_u4 = Lambda(lambda x: x[:,:,:, 512*20+256*4+128*4+64*4:512*20+256*4+128*4+64*4+3])(adain_params)
+        std_u4  = Lambda(lambda x: x[:,:,:, 512*20+256*4+128*4+64*4+3:512*20+256*4+128*4+64*4+6])(adain_params)
+
+        # Main forward
+        hid = self.downsample(landmarks, 64, i_norm=True)
+        hid = self.downsample(hid, 128, i_norm=True)
+        hid = self.downsample(hid, 256, i_norm=True)
         hid = SelfAttention(256)(hid)
-        hid = self.downsample(hid, 256, instance_normalization=True)
-        hid = self.downsample(hid, 256, instance_normalization=True)
-        hid = self.downsample(hid, 256, instance_normalization=True)
-        hid = self.downsample(hid, 512, instance_normalization=True)
- #       hid = ZeroPadding2D(padding=((0, 1),(0, 1)))(hid)  # For input size is 224p
+        hid = self.downsample(hid, 512, i_norm=True)
         
-        hid = self.resblock(hid, 512)
-        hid = self.resblock(hid, 512)
+        hid = self.resblock(hid, 512, mean_b00, std_b00, mean_b01, std_b01)
+        hid = self.resblock(hid, 512, mean_b10, std_b10, mean_b11, std_b11)
+        hid = self.resblock(hid, 512, mean_b20, std_b20, mean_b21, std_b21)
+        hid = self.resblock(hid, 512, mean_b30, std_b30, mean_b31, std_b31))
         
-        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='4')
-        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='8')
-#        hid = Cropping2D(cropping=((0,1), (0,1)))(hid)  # For input size is 224p
-        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='16')
-        hid = self.upsample(hid, 256, style_embedding, instance_normalization=True, name='32')
-        hid = self.upsample(hid, 128, style_embedding, instance_normalization=True, name='64')
-        hid = SelfAttention(128)(hid)
-        hid = self.upsample(hid, 64, style_embedding, instance_normalization=True, name='128')
-        hid = self.upsample(hid, 64, style_embedding, instance_normalization=True, name='256')
+        hid = self.upsample(hid, 512, mean_u00, std_u00, mean_u01, std_u01)
+        hid = self.upsample(hid, 256, mean_u10, std_u10, mean_u11, std_u11)
+        hid = SelfAttention(256)(hid)
+        hid = self.upsample(hid, 128, mean_u20, std_u20, mean_u21, std_u21)
+        hid = self.upsample(hid, 64,  mean_u30, std_u30, mean_u31, std_u31)
         hid = ConvSN2D(3, (1, 1), padding='same', kernel_initializer='he_normal')(hid)
+        hid = ReLU()(hid)
+        hid = AdaInstanceNormalization()([hid, mean_u4, std_u4])
         fake_frame = Activation('tanh', name='fake_frame')(hid)
 
         generator = Model(
@@ -238,7 +252,6 @@ class GAN:
         embedder = self.build_embedder()
         generator = self.build_generator()
         intermediate_discriminator = self._build_intermediate_discriminator_model(discriminator)
-
         intermediate_vgg19 = self.build_intermediate_vgg19_model()
         intermediate_vggface = self.build_intermediate_vggface_model()
         discriminator.trainable = False
@@ -247,35 +260,39 @@ class GAN:
         intermediate_vggface.trainable = False
 
         input_lndmk = Input(shape=self.input_shape, name='landmarks')
-        input_embedder_frames = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_frames')
-        input_embedder_lndmks = Input(shape=(self.h, self.w, self.c * self.k), name='input_embedder_lndmks')
+        condition = Input(shape=(self.num_videos,), name='condition')
+        inputs_embedder = [Input((self.h, self.w, self.c * 2), name='style{}'.format(i)) for i in range(self.k)]  # (BATCH_SIZE, H, W, 6)
         
-        embedder_embedding = embedder([input_embedder_frames, input_embedder_lndmks])
-        fake_frame = generator([input_lndmk, embedder_embedding])
-        intermediate_vgg19_outputs = intermediate_vgg19(fake_frame)
-        intermediate_vggface_outputs = intermediate_vggface(fake_frame)
-        intermediate_discriminator_outputs = intermediate_discriminator([fake_frame, input_lndmk])
+        embeddings = [embedder(em_input) for em_input in inputs_embedder]  # (BATCH_SIZE, 512)
+        
+        embeddings_expand = [Lambda(lambda x: K.expand_dims(x, axis=1))(vector) for vector in embedding_vectors]  # (BATCH_SIZE, 1, 512)
+        embedding = Concatenate(axis=1)(embeddings_expand)  # (BATCH_SIZE, K, 512)
+        average_embedding = GlobalAveragePooling1D()(embeddings)  # (BATCH_SIZE, 512)
+        fake_frame = generator([input_lndmk, average_embedding])
+
+        intermediate_vgg19_fakes = intermediate_vgg19(fake_frame)
+        intermediate_vggface_fakes = intermediate_vggface(fake_frame)
+        intermediate_discriminator_fakes = intermediate_discriminator([fake_frame, input_lndmk])
+        
         if meta:
             self._build_embedding_discriminator_model(discriminator)  # Call embedding discriminator when meta learning
-            condition = Input(shape=(self.num_videos,), name='condition')
             realicity = discriminator([fake_frame, input_lndmk, condition])
             combined = Model(
-                inputs = [input_lndmk, input_embedder_frames, input_embedder_lndmks, condition],
-                outputs = intermediate_vgg19_outputs + intermediate_vggface_outputs + [realicity] + intermediate_discriminator_outputs + [embedder_embedding],
+                inputs = [input_lndmk] + inputs_embedder + [condition],
+                outputs = intermediate_vgg19_fakes + intermediate_vggface_fakes + [realicity] + intermediate_discriminator_fakes + embeddings,
                 name = 'combined'
                 )
-            loss = ['mae'] * len(intermediate_vgg19_outputs) + ['mae'] * len(intermediate_vggface_outputs) + ['hinge'] + ['mae'] * len(intermediate_discriminator_outputs) + ['mae']
-            loss_weights = [1.5e-1] * len(intermediate_vgg19_outputs) + [2.5e-2] * len(intermediate_vggface_outputs) + [10] + [10] * len(intermediate_discriminator_outputs) + [10]
-
+            loss = ['mae'] * len(intermediate_vgg19_fakes) + ['mae'] * len(intermediate_vggface_fakes) + ['hinge'] + ['mae'] * len(intermediate_discriminator_fakes) + ['mae'] * self.k
+            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [10] + [10] * len(intermediate_discriminator_fakes) + [10] * self.k
         else:
-            realicity = discriminator([fake_frame, input_lndmk, embedder_embedding])
+            realicity = discriminator([fake_frame, input_lndmk, average_embedding])
             combined = Model(
-                inputs = [input_lndmk, input_embedder_frames, input_embedder_lndmks],
-                outputs = intermediate_vgg19_outputs + intermediate_vggface_outputs + [realicity] + intermediate_discriminator_outputs,
+                inputs = [input_lndmk] + inputs_embedder,
+                outputs = intermediate_vgg19_fakes + intermediate_vggface_fakes + [realicity] + intermediate_discriminator_fakes,
                 name = 'combined'
             )
-            loss = ['mae'] * len(intermediate_vgg19_outputs) + ['mae'] * len(intermediate_vggface_outputs) + ['hinge'] + ['mae'] * len(intermediate_discriminator_outputs)
-            loss_weights = [1.5e-1] * len(intermediate_vgg19_outputs) + [2.5e-2] * len(intermediate_vggface_outputs) + [10] + [10] * len(intermediate_discriminator_outputs)
+            loss = ['mae'] * len(intermediate_vgg19_fakes) + ['mae'] * len(intermediate_vggface_fakes) + ['hinge'] + ['mae'] * len(intermediate_discriminator_fakes)
+            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [10] + [10] * len(intermediate_discriminator_fakes)
 
         self.embedder = embedder
         self.generator = generator

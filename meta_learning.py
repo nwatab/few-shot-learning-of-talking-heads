@@ -58,7 +58,7 @@ def meta_learn():
     frame_shape = h, w, c = (256, 256, 3)
     input_embedder_shape = (h, w, k * c)
     BATCH_SIZE = 12
-    num_videos = 1200#145008  # This is dividable by BATCH_SIZE. All data is 145520
+    num_videos = 2400#145008  # This is dividable by BATCH_SIZE. All data is 145520
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
     datapath = './datasets/voxceleb2-9f/train/lndmks'
@@ -83,22 +83,26 @@ def meta_learn():
 
     for epoch in range(epochs):
         logger.info(('Epoch: ', epoch))
-        for batch_ix, (frames, landmarks, embedding_frames, embedding_landmarks, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
+        for batch_ix, (frames, landmarks, style, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
             if batch_ix == num_batches:
                 break
             valid = np.ones((frames.shape[0], 1))
             invalid = - valid
 
-            intermediate_vgg19_outputs = intermediate_vgg19.predict_on_batch(frames)
-            intermediate_vggface_outputs  =intermediate_vggface.predict_on_batch(frames)
-            intermediate_discriminator_outputs = intermediate_discriminator.predict_on_batch([frames, landmarks])
-            e_hat = embedder.predict_on_batch([embedding_frames, embedding_landmarks])
+            intermediate_vgg19_reals = intermediate_vgg19.predict_on_batch(frames)
+            intermediate_vggfacereals  =intermediate_vggface.predict_on_batch(frames)
+            intermediate_discriminator_reals = intermediate_discriminator.predict_on_batch([frames, landmarks])
+
+            style_list = [style[:, i, :, :] for i in range(k)]
+            e_hats = [embedder.predict_on_batch(style) for style in style_list]
+            average_embedding = np.mean(np.array(e_hats), axis=0)
+#            e_hat = embedder.predict_on_batch([embedding_frames, embedding_landmarks])
             w_i = embedding_discriminator.predict_on_batch(condition)
-            fake_frames = generator.predict_on_batch([landmarks, e_hat])
-            
+            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
+
             g_loss = combined_to_train.train_on_batch(
-                [landmarks, embedding_frames, embedding_landmarks, condition],
-                intermediate_vgg19_outputs + intermediate_vggface_outputs + [valid] + intermediate_discriminator_outputs + [w_i]
+                [landmarks] + style_list +[condition],
+                intermediate_vgg19_reals + intermediate_vggface_reals + [valid] + intermediate_discriminator_reals + [w_i] * k
             )
             d_loss_real = discriminator_to_train.train_on_batch(
                 [frames, landmarks, condition],

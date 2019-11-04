@@ -24,8 +24,7 @@ def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=
         j = 0
         frame = []
         lndmk = []
-        frames_embedding = []
-        lndmks_embedding = []
+        styles = []
         condition = []
         for cur, dirs, files in os.walk(landmark_path):
             if not files:
@@ -59,41 +58,40 @@ def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=
             if output_shape:
                 frames_embedding_list = [skimage.transform.resize(img, output_shape) for img in frames_embedding_list]
                 lndmks_embedding_list = [skimage.transform.resize(img, output_shape) for img in lndmks_embedding_list]
-            frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
-            lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
-            if frames_embedding_arr.shape[-1] < k * 3:
+            frames_embedding_arr = np.array(frames_embedding_list)
+            lndmks_embedding_arr = np.array(lndmks_embedding_list)
+#            frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
+#            lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
+            if frames_embedding_arr.shape[0] < k :
                 # augmente to k frames if embedding input is not enough
-                frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, ::-1, :]), axis=-1)
-                lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, ::-1, :]), axis=-1)
-            frames_embedding_arr = frames_embedding_arr[:, :, :k * 3]
-            lndmks_embedding_arr = lndmks_embedding_arr[:, :, :k * 3]
-            frames_embedding.append(frames_embedding_arr)
-            lndmks_embedding.append(lndmks_embedding_arr)
+                frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, :, ::-1, :]), axis=0)
+                lndmks_embedding_arr = np.concatenate((lndmks_embedding_arr, lndmks_embedding_arr[:, :, ::-1, :]), axis=0)
+            frames_embedding_arr = frames_embedding_arr[:k, :, :, :]
+            lndmks_embedding_arr = lndmks_embedding_arr[:k, :, :, :]
+            style = np.concatenate((lndmks_embedding_arr, frames_embedding_arr),axis=-1)  # (k, H, W, 6)
+            styles.append(style)
             if meta:
                 condition.append(j)
                 j += 1
             if len(frame) == batch_size:
                 frame_temp = np.array(frame) / 127.5 - 1
                 lndmk_temp = np.array(lndmk) / 127.5 - 1
-                frames_embedding_temp = np.array(frames_embedding) / 127.5 - 1
-                lndmks_embedding_temp = np.array(lndmks_embedding) / 127.5 - 1
+                styles_temp = np.array(styles) / 127.5 - 1
                 if meta:
 #                    condition_temp = np.eye(num_video)[condition]
                     condition_temp = utils.to_categorical(condition, num_classes=num_video)
                     condition = []
                 frame = []
                 lndmk = []
-                frames_embedding = []
-                lndmks_embedding = []
+                styles = []
                 if meta:
-                    yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp, condition_temp
+                    yield frame_temp, lndmk_temp, styles_temp, condition_temp
                 else:
-                    yield frame_temp, lndmk_temp, frames_embedding_temp, lndmks_embedding_temp
+                    yield frame_temp, lndmk_temp, styles_temp
                 
 if __name__ == '__main__':
     path = './datasets/voxceleb2-9f/train/lndmks/'
 #    path = './datasets/fewshot/monalisa/lndmks'
-    for batch_ix, (f, l, fe, le, c) in enumerate(flow_from_dir(path, num_video=145000, batch_size=12, k=8, meta=True)):
-        print(batch_ix, f.shape, l.shape, fe.shape, le.shape)
-        print(f.min(), f.max(), l.min(), l.max(), fe.min(), fe.max(), le.min(), le.max())
-
+    for batch_ix, (f, l, s, c) in enumerate(flow_from_dir(path, num_video=145000, batch_size=12, k=8, meta=True)):
+        print(batch_ix, f.shape, s.shape)
+        print(f.min(), f.max(), l.min(), l.max(), s.min(), s.max())
