@@ -90,34 +90,37 @@ def meta_learn():
             invalid = - valid
 
             intermediate_vgg19_reals = intermediate_vgg19.predict_on_batch(frames)
-            intermediate_vggfacereals  =intermediate_vggface.predict_on_batch(frames)
+            intermediate_vggface_reals = intermediate_vggface.predict_on_batch(frames)
             intermediate_discriminator_reals = intermediate_discriminator.predict_on_batch([frames, landmarks])
 
             style_list = [style[:, i, :, :] for i in range(k)]
-            e_hats = [embedder.predict_on_batch(style) for style in style_list]
-            average_embedding = np.mean(np.array(e_hats), axis=0)
+            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
+            average_embedding = np.mean(np.array(embeddings_list), axis=0)
 #            e_hat = embedder.predict_on_batch([embedding_frames, embedding_landmarks])
             w_i = embedding_discriminator.predict_on_batch(condition)
             fake_frames = generator.predict_on_batch([landmarks, average_embedding])
 
+            logging.info(embedder.get_weights())
             g_loss = combined_to_train.train_on_batch(
-                [landmarks] + style_list +[condition],
+                [landmarks] + style_list + [condition],
                 intermediate_vgg19_reals + intermediate_vggface_reals + [valid] + intermediate_discriminator_reals + [w_i] * k
             )
+
             d_loss_real = discriminator_to_train.train_on_batch(
                 [frames, landmarks, condition],
                 [valid]
             )
+
             d_loss_fake = discriminator_to_train.train_on_batch(
                 [fake_frames, landmarks, condition],
                 [invalid]
             )
             logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
 
-            if batch_ix % 95 == 0:
+            if batch_ix % 95 == 0 and batch_ix > 0:
                 # Save whole model
-                combined.save('trained_models/{}_meta_combined.h5'.format(epoch))
-                discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
+                # combined.save('trained_models/{}_meta_combined.h5'.format(epoch))
+                # discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
 
                 # Save weights only
                 combined.save_weights('trained_models/{}_meta_combined_weights.h5'.format(epoch))
