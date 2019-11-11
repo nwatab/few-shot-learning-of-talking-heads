@@ -93,7 +93,7 @@ def meta_learn():
             intermediate_vggface_reals = intermediate_vggface.predict_on_batch(frames)
             intermediate_discriminator_reals = intermediate_discriminator.predict_on_batch([frames, landmarks])
 
-            style_list = [style[:, i, :, :] for i in range(k)]
+            style_list = [style[:, i, :, :, :] for i in range(k)]
             embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
             average_embedding = np.mean(np.array(embeddings_list), axis=0)
 #            e_hat = embedder.predict_on_batch([embedding_frames, embedding_landmarks])
