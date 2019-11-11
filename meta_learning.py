@@ -58,7 +58,7 @@ def meta_learn():
     frame_shape = h, w, c = (256, 256, 3)
     input_embedder_shape = (h, w, k * c)
     BATCH_SIZE = 12
-    num_videos = 2400#145008  # This is dividable by BATCH_SIZE. All data is 145520
+    num_videos = 145008  # This is dividable by BATCH_SIZE. All data is 145520
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
     datapath = './datasets/voxceleb2-9f/train/lndmks'
@@ -99,8 +99,6 @@ def meta_learn():
 #            e_hat = embedder.predict_on_batch([embedding_frames, embedding_landmarks])
             w_i = embedding_discriminator.predict_on_batch(condition)
             fake_frames = generator.predict_on_batch([landmarks, average_embedding])
-
-            logging.info(embedder.get_weights())
             g_loss = combined_to_train.train_on_batch(
                 [landmarks] + style_list + [condition],
                 intermediate_vgg19_reals + intermediate_vggface_reals + [valid] + intermediate_discriminator_reals + [w_i] * k
@@ -117,7 +115,7 @@ def meta_learn():
             )
             logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
 
-            if batch_ix % 95 == 0 and batch_ix > 0:
+            if batch_ix % 100 == 0 and batch_ix > 0:
                 # Save whole model
                 # combined.save('trained_models/{}_meta_combined.h5'.format(epoch))
                 # discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
@@ -127,7 +125,7 @@ def meta_learn():
                 combined.get_layer('generator').save_weights('trained_models/{}_meta_generator_in_combined.h5'.format(epoch))
                 combined.get_layer('embedder').save_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(epoch))
                 discriminator.save_weights('trained_models/{}_meta_discriminator_weights.h5'.format(epoch))
-                logging.info('Checkpoint saved at Epoch: {}; batch_ix: {}'.format(epoch, batch_ix))
+                logger.info('Checkpoint saved at Epoch: {}; batch_ix: {}'.format(epoch, batch_ix))
         print()
     
 if __name__ == '__main__':

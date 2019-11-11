@@ -30,10 +30,16 @@ class AdaInstanceNormalization(Layer):
         input_shape = K.int_shape(content)
         reduction_axes = [1, 2]  #list(range(0, len(input_shape)))
 
-        mean = K.mean(content, reduction_axes, keepdims=True)
-        stddev = K.std(content, reduction_axes, keepdims=True) + self.epsilon
-        styled_content = style_mean + style_std * (content - mean) / stddev
-        return styled_content
+#        styled_content = style_mean + style_std * (content - mean) / stddev
+
+        content_mean, content_var = tf.nn.moments(content, reduction_axes, keep_dims=True)
+        stylized_content = tf.nn.batch_normalization(content,
+                                        content_mean,
+                                        content_var,
+                                        style_mean,
+                                        style_std,
+                                        self.epsilon)
+        return stylized_content
     
     def get_config(self):
         config = {

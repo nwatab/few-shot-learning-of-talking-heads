@@ -46,10 +46,10 @@ class GAN:
         shortcut = x
 
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-#        x = AdaInstanceNormalization()([x, mean0, std0])
+        x = AdaInstanceNormalization()([x, mean0, std0])
         x = ReLU()(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-#        x = AdaInstanceNormalization()([x, mean1, std1])
+        x = AdaInstanceNormalization()([x, mean1, std1])
 
         if shortcut.shape[-1] != channels:
             shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer='he_normal')(shortcut)
@@ -60,11 +60,11 @@ class GAN:
     def upsample(self, x, channels, mean0, std0, mean1, std1):
         shortcut = x
 
-#        x = AdaInstanceNormalization()([x, mean0, std0])
+        x = AdaInstanceNormalization()([x, mean0, std0])
         x = ReLU()(x)
         x = UpSampling2D(size=(2, 2))(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-#        x = AdaInstanceNormalization()([x, mean1, std1])
+        x = AdaInstanceNormalization()([x, mean1, std1])
         x = ReLU()(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
 

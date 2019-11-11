@@ -49,15 +49,15 @@ def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=
             frame_array = imageio.imread(frame_path)
             lndmk_array = imageio.imread(lndmk_path)
             if output_shape:
-                frame_array = skimage.transform.resize(frame_array, output_shape)
-                lndmk_array = skimage.transform.resize(lndmk_array, output_shape)
+                frame_array = skimage.transform.resize(frame_array, output_shape, preserve_range=True)
+                lndmk_array = skimage.transform.resize(lndmk_array, output_shape, preserve_range=True)
             frame.append(frame_array)
             lndmk.append(lndmk_array)
             frames_embedding_list = [imageio.imread(path) for path in frames_embedding_paths]
             lndmks_embedding_list = [imageio.imread(path) for path in lndmks_embedding_paths]
             if output_shape:
-                frames_embedding_list = [skimage.transform.resize(img, output_shape) for img in frames_embedding_list]
-                lndmks_embedding_list = [skimage.transform.resize(img, output_shape) for img in lndmks_embedding_list]
+                frames_embedding_list = [skimage.transform.resize(img, output_shape, preserve_range=True) for img in frames_embedding_list]
+                lndmks_embedding_list = [skimage.transform.resize(img, output_shape, preserve_range=True) for img in lndmks_embedding_list]
             frames_embedding_arr = np.array(frames_embedding_list)
             lndmks_embedding_arr = np.array(lndmks_embedding_list)
 #            frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
