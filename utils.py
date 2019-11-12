@@ -27,7 +27,7 @@ class AdaInstanceNormalization(Layer):
     def call(self, inputs, training=None):
         content, style_mean, style_std = inputs[0], inputs[1], inputs[2]
         input_shape = K.int_shape(content)
-        reduction_axes = [1, 2
+        reduction_axes = [1, 2]
         content_mean, content_var = tf.nn.moments(content, reduction_axes, keep_dims=True)
         stylized_content = tf.nn.batch_normalization(content,
                                         content_mean,
