@@ -5,7 +5,6 @@ from keras.layers import Conv2D, Dense, Flatten
 from keras.layers.pooling import _GlobalPooling2D
 
 
-
 class AdaInstanceNormalization(Layer):
     """ Input b and g should be 1x1xC """
     def __init__(self, 
@@ -28,10 +27,7 @@ class AdaInstanceNormalization(Layer):
     def call(self, inputs, training=None):
         content, style_mean, style_std = inputs[0], inputs[1], inputs[2]
         input_shape = K.int_shape(content)
-        reduction_axes = [1, 2]  #list(range(0, len(input_shape)))
-
-#        styled_content = style_mean + style_std * (content - mean) / stddev
-
+        reduction_axes = [1, 2
         content_mean, content_var = tf.nn.moments(content, reduction_axes, keep_dims=True)
         stylized_content = tf.nn.batch_normalization(content,
                                         content_mean,
@@ -55,51 +51,6 @@ class AdaInstanceNormalization(Layer):
     def compute_output_shape(self, input_shape):
         content_shape = input_shape[0]
         return content_shape
-
-class AdaIN(Layer):
-    """ Borrowed and modified https://github.com/liuwei16/adain-keras/blob/master/layers.py """
-    def __init__(self, data_format='channels_last', eps=1e-5, **kwargs):
-        super(AdaIN, self).__init__(**kwargs)
-        self.data_format = K.normalize_data_format(data_format)
-        self.spatial_axis = [1, 2] if self.data_format == 'channels_last' else [2, 3]
-        self.eps = eps
-
-    def compute_output_shape(self, input_shape):
-        return input_shape
-
-    def call(self, inputs):
-        """  inputs = [content, style_mean, style_std]  """
-        content, style_mean, style_std = inputs
-        content_mean, content_var = tf.nn.moments(content, self.spatial_axis, keep_dims=True)
-        out = tf.nn.batch_normalization(content,
-                                        content_mean,
-                                        content_var,
-                                        style_mean,
-                                        style_std,
-                                        self.eps)
-        return out
-
-    def get_config(self):
-        config = {'eps': self.eps}
-        base_config = super(AdaIN, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-#def adain(x, y_mean, y_scale, y_bias, epsilon=1e-5):
-#    '''
-#    Borrowed from https://github.com/jonrei/tf-AdaIN
-#    Normalizes the `content_features` with scaling and offset from `style_features`.
-#    See "5. Adaptive Instance Normalization" in https://arxiv.org/abs/1703.06868 for details.
-#    '''
-#    x_mean, x_variance = tf.nn.moments(x, [1, 2], keep_dims=True)
-#    normalized_x = tf.nn.batch_normalization(
-#        x,
-#        x_mean,
-#        x_variance,
-#        y_mean,
-#        y_scale,
-#        epsilon
-#        )
-#    return normalized_content_features
 
 
 class DenseSN(Dense):
@@ -160,6 +111,7 @@ class DenseSN(Dense):
             output = self.activation(output)
         return output 
 
+                          
 class ConvSN2D(Conv2D):
     """ Borrowed from https://github.com/IShengFang/SpectralNormalizationKeras """
     def __init__(self, filters, kernel_size, **kwargs):
@@ -245,6 +197,7 @@ class ConvSN2D(Conv2D):
             return self.activation(outputs)
         return outputs
 
+                          
 class GlobalSumPooling2D(_GlobalPooling2D):
     """Global sum pooling operation for spatial data.
     # Arguments
@@ -277,9 +230,9 @@ class GlobalSumPooling2D(_GlobalPooling2D):
             return K.sum(inputs, axis=[2, 3])
 
 
-
 from keras.engine.topology import Layer
 from keras import initializers
+
 
 class Bias(Layer):
     """
@@ -296,49 +249,8 @@ class Bias(Layer):
     
     def call(self, x):
         return K.bias_add(x, self.bias, data_format='channels_last')
-#        return x + self.bias
 
-# Self attention is Taken from https://gist.github.com/sthalles/507ce723226274db8097c24c5359d88a
-class _SelfAttention(Layer):
-    def __init__(self, number_of_filters, **kwargs):
-        super(SelfAttention, self).__init__(**kwargs)
-        self.number_of_filters = number_of_filters
-        
-        self.f = ConvSN2D(number_of_filters // 8, 1, strides=1, padding='same', name="f_x")
-        self.g = ConvSN2D(number_of_filters // 8, 1, strides=1, padding='same', name="g_x")
-        self.h = ConvSN2D(number_of_filters,    1, strides=1, padding='same', name="h_x")
-        self.gamma = tf.contrib.eager.Variable(0., trainable=True, name="gamma")
-#        self.flatten = tf.keras.layers.Flatten()
-        self.flatten = Flatten()
-
-    def hw_flatten(self, x):
-        # Input shape x: [BATCH, HEIGHT, WIDTH, CHANNELS]
-        # flat the feature volume across the width and height dimensions 
-        x_shape = tf.shape(x)
-        return tf.reshape(x, [x_shape[0], -1, x_shape[-1]]) # return [BATCH, W*H, CHANNELS]
-    
-    def call(self, x):
-        f = self.f(x)
-        g = self.g(x)
-        h = self.h(x)
-
-        f_flatten = self.hw_flatten(f)
-        g_flatten = self.hw_flatten(g)
-        h_flatten = self.hw_flatten(h)
-
-        s = tf.matmul(g_flatten, f_flatten, transpose_b=True) # [B,N,C] * [B, N, C] = [B, N, N]
-
-        b = tf.nn.softmax(s, axis=-1)
-        o = tf.matmul(b, h_flatten)
-        y = self.gamma * tf.reshape(o, tf.shape(x)) + x
-        return y
-
-    def get_config(self):
-        config = {'number_of_filters': self.number_of_filters}
-        base_config = super(SelfAttention, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
+                          
 class SelfAttention(Layer):
     def __init__(self, channels, kernel_initializer='he_normal', **kwargs):
         super(SelfAttention, self).__init__(**kwargs)
