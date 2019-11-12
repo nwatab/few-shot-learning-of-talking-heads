@@ -8,8 +8,7 @@ from keras_contrib.layers.normalization.instancenormalization import InstanceNor
 from keras_vggface.vggface import VGGFace
 import tensorflow as tf
 
-from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttention
-from utils import AdaInstanceNormalization
+from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaInstanceNormalization, Bias, SelfAttention
 
 
 class GAN:

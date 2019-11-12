@@ -1,15 +1,12 @@
 import logging
 import os
 
-from keras.models import Model, load_model, model_from_json
-from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
 from keras.optimizers import Adam
 from keras.utils import multi_gpu_model
 import numpy as np
 import tensorflow as tf
 
 from models import GAN
-from utils import AdaIN, ConvSN2D, SelfAttention, DenseSN, Bias, GlobalSumPooling2D, Bias
 from data_loader import flow_from_dir
 
 
@@ -65,8 +62,8 @@ def fewshot_learn():
                 [valid]
             )
             
-
             fake_frames = generator.predict_on_batch([landmarks, average_embedding])
+
             d_loss_fake = discriminator_to_train.train_on_batch(
                 [fake_frames, landmarks, average_embedding],
                 [invalid]
