@@ -1,17 +1,12 @@
-from keras.models import Model, load_model, model_from_json
-from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
-from keras.optimizers import Adam
-from keras.utils import multi_gpu_model
+import logging
+import os
+
 import numpy as np
-import tensorflow as tf
 import imageio
 import skimage
 
 from models import GAN
-from utils import AdaIN, ConvSN2D, SelfAttention, DenseSN, Bias, GlobalSumPooling2D, Bias
 
-import logging
-import os
 
 def load_image(path, shape):
     img = imageio.imread(path)
