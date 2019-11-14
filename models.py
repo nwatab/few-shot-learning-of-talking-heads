@@ -22,18 +22,18 @@ class GAN:
         self.num_videos = num_videos
         self.k = k
 
-    def downsample(self, x, channels, i_norm=False, act_name=None):
+    def downsample(self, x, channels, i_norm=False, fm=None):
         """  Downsampling is similar to an implementation in BigGAN """
         shortcut = x
  
-        x = ReLU()(x)
+        x = ReLU(name=fm)(x)
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same',)(x)
         if i_norm:
-            x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
-        x = ReLU(name=act_name)(x)
+            x = InstanceNormalization(axis=-1)(x)  # use in generator
+        x = ReLU()(x)
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
         if i_norm:
-            x = InstanceNormalization(axis=-1)(x)  # might be unnecessary
+            x = InstanceNormalization(axis=-1)(x)  # use in generator
         x = AveragePooling2D(pool_size=(2, 2))(x)
 
         shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer = 'he_normal')(shortcut)
@@ -51,8 +51,16 @@ class GAN:
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         x = AdaInstanceNormalization()([x, mean1, std1])
 
-        if shortcut.shape[-1] != channels:
-            shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer='he_normal')(shortcut)
+        x = Add()([x, shortcut])
+        return x
+
+    def resblock_d(self, x, channels, fm=None):
+        shortcut = x
+
+        x = ReLU(name=fm)(x)
+        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
+        x = ReLU()(x)
+        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
 
         x = Add()([x, shortcut])
         return x
@@ -186,7 +194,7 @@ class GAN:
         hid = self.downsample(landmarks, 64, i_norm=True)
         hid = self.downsample(hid, 128, i_norm=True)
         hid = self.downsample(hid, 256, i_norm=True)
-#        hid = SelfAttention(256)(hid)
+        hid = SelfAttention(256)(hid)
         hid = self.downsample(hid, 512, i_norm=True)
         
         hid = self.resblock(hid, 512, mean_b00, std_b00, mean_b01, std_b01)
@@ -196,7 +204,7 @@ class GAN:
         
         hid = self.upsample(hid, 512, mean_u00, std_u00, mean_u01, std_u01)
         hid = self.upsample(hid, 256, mean_u10, std_u10, mean_u11, std_u11)
-#        hid = SelfAttention(256)(hid)
+        hid = SelfAttention(256)(hid)
         hid = self.upsample(hid, 128, mean_u20, std_u20, mean_u21, std_u21)
         hid = self.upsample(hid, 64,  mean_u30, std_u30, mean_u31, std_u31)
         hid = ConvSN2D(3, (1, 1), padding='same', kernel_initializer='he_normal')(hid)
@@ -218,15 +226,15 @@ class GAN:
         input_frame = Input(shape=self.input_shape, name='frames')
         input_landmark = Input(shape=self.input_shape, name='landmarks')
         inputs = Concatenate()([input_frame, input_landmark])
-        hid = self.downsample(inputs, 64, act_name='fm7')
-        hid = self.downsample(hid, 128, act_name='fm6')
-        hid = self.downsample(hid, 256, act_name='fm5')
+        hid = self.downsample(inputs, 64)
+        hid = self.downsample(hid, 128, fm='fm6')
+        hid = self.downsample(hid, 256, fm='fm5')
         hid = SelfAttention(256)(hid)
-        hid = self.downsample(hid, 256, act_name='fm4')
-        hid = self.downsample(hid, 256, act_name='fm3')
-        hid = self.downsample(hid, 256, act_name='fm2')
-        hid = self.downsample(hid, 512, act_name='fm1')
-        hid = Activation('relu')(hid)
+        hid = self.downsample(hid, 512, fm='fm4')
+        hid = self.downsample(hid, 512, fm='fm3')
+        hid = self.downsample(hid, 512, fm='fm2')
+        hid = self.resblock_d(hid, 512, fm='fm1')
+        hid = ReLU(name='fm0')(hid)
         v = GlobalSumPooling2D()(hid)
 
         if meta:
@@ -255,7 +263,7 @@ class GAN:
         return self.embedding_discriminator
 
     def _build_intermediate_discriminator_model(self, discriminator):
-        layer_names = ['fm{}'.format(i) for i in range(1, 8)]
+        layer_names = ['fm{}'.format(i) for i in range(0, 7)]
         fm_outputs = [discriminator.get_layer(layer_name).output for layer_name in layer_names]
         self.intermediate_discriminator = Model(discriminator.input[:2], fm_outputs, name='intermediate_discriminator')
         return self.intermediate_discriminator
@@ -286,10 +294,14 @@ class GAN:
         inputs_embedder = [Input((self.h, self.w, self.c * 2), name='style{}'.format(i)) for i in range(self.k)]  # (BATCH_SIZE, H, W, 6)
         
         embeddings = [embedder(em_input) for em_input in inputs_embedder]  # (BATCH_SIZE, 512)
-        
-        embeddings_expand = [Lambda(lambda x: K.expand_dims(x, axis=1))(embedding) for embedding in embeddings]  # (BATCH_SIZE, 1, 512)
-        embedding_k = Concatenate(axis=1)(embeddings_expand)  # (BATCH_SIZE, K, 512)
-        average_embedding = GlobalAveragePooling1D()(embedding_k)  # (BATCH_SIZE, 512)
+
+        if self.k > 1:
+            embeddings_expand = [Lambda(lambda x: K.expand_dims(x, axis=1))(embedding) for embedding in embeddings]  # (BATCH_SIZE, 1, 512)
+            embedding_k = Concatenate(axis=1)(embeddings_expand)  # (BATCH_SIZE, K, 512)
+            average_embedding = GlobalAveragePooling1D()(embedding_k)  # (BATCH_SIZE, 512)
+        else:
+            average_embedding = embeddings[0]
+
         fake_frame = generator([input_lndmk, average_embedding])
 
         intermediate_vgg19_fakes = intermediate_vgg19(fake_frame)
@@ -305,8 +317,9 @@ class GAN:
                 name = 'combined'
                 )
             loss = ['mae'] * len(intermediate_vgg19_fakes) + ['mae'] * len(intermediate_vggface_fakes) + ['hinge'] + ['mae'] * len(intermediate_discriminator_fakes) + ['mae'] * self.k
-            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [10] + [10] * len(intermediate_discriminator_fakes) + [10] * self.k
+            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [1] + [10] * len(intermediate_discriminator_fakes) + [10] * self.k
         else:
+            embedder.trainable = False
             realicity = discriminator([fake_frame, input_lndmk, average_embedding])
             combined = Model(
                 inputs = [input_lndmk] + inputs_embedder,
@@ -314,7 +327,7 @@ class GAN:
                 name = 'combined'
             )
             loss = ['mae'] * len(intermediate_vgg19_fakes) + ['mae'] * len(intermediate_vggface_fakes) + ['hinge'] + ['mae'] * len(intermediate_discriminator_fakes)
-            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [10] + [10] * len(intermediate_discriminator_fakes)
+            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [1] + [10] * len(intermediate_discriminator_fakes)
 
         self.embedder = embedder
         self.generator = generator
