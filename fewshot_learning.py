@@ -1,17 +1,13 @@
-from keras.models import Model, load_model, model_from_json
-from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
+import logging
+import os
+
 from keras.optimizers import Adam
 from keras.utils import multi_gpu_model
 import numpy as np
 import tensorflow as tf
 
 from models import GAN
-from utils import AdaIN, ConvSN2D, SelfAttention, DenseSN, Bias, GlobalSumPooling2D, Bias
 from data_loader import flow_from_dir
-from meta_learning import perceptual_loss, hinge_loss
-
-import logging
-import os
 
 
 def fewshot_learn():
@@ -35,13 +31,6 @@ def fewshot_learn():
         intermediate_vgg19 = gan.intermediate_vgg19
         intermediate_vggface = gan.intermediate_vggface
         intermediate_discriminator = gan.intermediate_discriminator
-
-    logger.info('==== discriminator ===')
-    discriminator.summary(print_fn=logger.info)
-    logger.info('=== generator ===')
-    combined.get_layer('generator').summary(print_fn=logger.info)
-    logger.info('=== embedder ===')
-    combined.get_layer('embedder').summary(print_fn=logger.info)
 
     discriminator.load_weights('trained_models/{}_meta_discriminator_weights.h5'.format(metalearning_epoch), by_name=True, skip_mismatch=True)
     combined.get_layer('embedder').load_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(metalearning_epoch))
@@ -67,15 +56,22 @@ def fewshot_learn():
                 [landmarks] + style_list,
                 intermediate_vgg19_outputs + intermediate_vggface_outputs + [valid] + intermediate_discriminator_outputs
             )
+
+            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
+            average_embedding = np.mean(np.array(embeddings_list), axis=0)
+
             d_loss_real = discriminator_to_train.train_on_batch(
                 [frames, landmarks, average_embedding],
                 [valid]
             )
+            
+            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
+
             d_loss_fake = discriminator_to_train.train_on_batch(
                 [fake_frames, landmarks, average_embedding],
                 [invalid]
             )
-        logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
+            logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
 
     # Save whole model
 #    combined.save('trained_models/{}_fewshot_combined.h5'.format(dataname))
@@ -84,7 +80,7 @@ def fewshot_learn():
     # Save weights only
 #    combined.save_weights('trained_models/{}_fewshot_combined_weights.h5'.format(dataname))
     combined.get_layer('generator').save_weights('trained_models/{}_fewshot_generator_in_combined.h5'.format(dataname))
-    combined.get_layer('embedder').save_weights('trained_models/{}_fewshot_embedder_in_combined.h5'.format(dataname))
+#    combined.get_layer('embedder').save_weights('trained_models/{}_fewshot_embedder_in_combined.h5'.format(dataname))
     discriminator.save_weights('trained_models/{}_fewshot_discriminator_weights.h5'.format(dataname))
         
 

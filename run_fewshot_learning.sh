@@ -1,7 +1,7 @@
 #!/bin/sh
 
-#$ -l rt_F=1
-#$ -l h_rt=72:00:00
+#$ -l rt_G.small=1
+#$ -l h_rt=1:00:00
 #$ -j y
 #$ -cwd
 

@@ -11,48 +11,6 @@ import logging
 import os
 
 
-def hinge_loss(y_true, y_pred):
-    """ y_true = 1 (True) or -1 (Fake) """
-    return tf.math.maximum(0., 1. - y_true * y_pred)
-
-def _vgg19_perceptual_loss(y_true, y_pred):
-    vgg19 = VGG19(input_shape=y_pred.get_shape().as_list()[1:], weights='imagenet', include_top=False)
-    vgg19.trainable = False
-    # Paper says Conv1, 6, 11, 20, 29 VGG19 layers but it isn't clear which layer is which layer
-    layer_names = ['block1_conv2', 'block2_conv2', 'block3_conv4', 'block4_conv4', 'block5_conv4']
-    prcp_layers = [vgg19.get_layer(layer_name).output for layer_name in layer_names]
-
-    prcp_model = Model(vgg19.input, prcp_layers)
-    prcp_trues = prcp_model(y_true)
-    prcp_preds = prcp_model(y_pred)
-
-    l1_losses = [K.mean(K.abs(prcp_true - prcp_pred), axis=[1,2,3])
-                 for prcp_true, prcp_pred in zip(prcp_trues, prcp_preds)]
-    loss = K.mean(tf.convert_to_tensor(l1_losses))
-    return loss
-
-def _vggface_perceptual_loss(y_true, y_pred):
-    vggface = VGGFace(input_shape=y_pred.get_shape().as_list()[1:], weights='vggface', include_top=False)
-    vggface.trainable = False
-
-    layer_names = ['conv1_2', 'conv2_2', 'conv3_3', 'conv4_3', 'conv5_3']
-    prcp_layers = [vggface.get_layer(layer_name).output for layer_name in layer_names]
-    prcp_model = Model(vggface.input, prcp_layers)
-
-    prcp_trues = prcp_model(y_true)
-    prcp_preds = prcp_model(y_pred)
-
-    l1_losses = [K.mean(K.abs(prcp_true - prcp_pred), axis=[1,2,3])
-                 for prcp_true, prcp_pred in zip(prcp_trues, prcp_preds)]
-    loss = K.mean(tf.convert_to_tensor(l1_losses))
-    return loss
-
-def perceptual_loss(y_true, y_pred):
-    vgg19_loss = _vgg19_perceptual_loss(y_true, y_pred)
-    vggface_loss = _vggface_perceptual_loss(y_true, y_pred)
-    sum_loss =  1e-2 * vgg19_loss + 2e-3 * vggface_loss
-    return sum_loss
-
 def meta_learn():
     k = 8
     frame_shape = h, w, c = (256, 256, 3)
@@ -83,7 +41,7 @@ def meta_learn():
 
     for epoch in range(epochs):
         logger.info(('Epoch: ', epoch))
-        for batch_ix, (frames, landmarks, style, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
+        for batch_ix, (frames, landmarks, styles, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
             if batch_ix == num_batches:
                 break
             valid = np.ones((frames.shape[0], 1))
@@ -93,12 +51,10 @@ def meta_learn():
             intermediate_vggface_reals = intermediate_vggface.predict_on_batch(frames)
             intermediate_discriminator_reals = intermediate_discriminator.predict_on_batch([frames, landmarks])
 
-            style_list = [style[:, i, :, :] for i in range(k)]
-            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
-            average_embedding = np.mean(np.array(embeddings_list), axis=0)
-#            e_hat = embedder.predict_on_batch([embedding_frames, embedding_landmarks])
+            style_list = [styles[:, i, :, :, :] for i in range(k)]
+
             w_i = embedding_discriminator.predict_on_batch(condition)
-            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
+
             g_loss = combined_to_train.train_on_batch(
                 [landmarks] + style_list + [condition],
                 intermediate_vgg19_reals + intermediate_vggface_reals + [valid] + intermediate_discriminator_reals + [w_i] * k
@@ -109,6 +65,9 @@ def meta_learn():
                 [valid]
             )
 
+            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
+            average_embedding = np.mean(np.array(embeddings_list), axis=0)
+            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
             d_loss_fake = discriminator_to_train.train_on_batch(
                 [fake_frames, landmarks, condition],
                 [invalid]
@@ -121,7 +80,7 @@ def meta_learn():
                 # discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
 
                 # Save weights only
-                combined.save_weights('trained_models/{}_meta_combined_weights.h5'.format(epoch))
+#                combined.save_weights('trained_models/{}_meta_combined_weights.h5'.format(epoch))
                 combined.get_layer('generator').save_weights('trained_models/{}_meta_generator_in_combined.h5'.format(epoch))
                 combined.get_layer('embedder').save_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(epoch))
                 discriminator.save_weights('trained_models/{}_meta_discriminator_weights.h5'.format(epoch))
@@ -129,8 +88,8 @@ def meta_learn():
         print()
     
 if __name__ == '__main__':
-    LOG_FILE = 'logs/meta_learning.log'
-    fmt = "%(asctime)s:%(levelname)s:%(name)s: %(message)s"
+    LOG_FILE = 'logs/meta_learning2.log'
+    fmt = "%(asctime)s:%(levelname)s:%(name)s:%(message)s"
     logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=fmt)
     logger = logging.getLogger(__name__)
     meta_learn()

@@ -60,8 +60,6 @@ def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=
                 lndmks_embedding_list = [skimage.transform.resize(img, output_shape, preserve_range=True) for img in lndmks_embedding_list]
             frames_embedding_arr = np.array(frames_embedding_list)
             lndmks_embedding_arr = np.array(lndmks_embedding_list)
-#            frames_embedding_arr = np.concatenate(frames_embedding_list, axis=-1)
-#            lndmks_embedding_arr = np.concatenate(lndmks_embedding_list, axis=-1)
             if frames_embedding_arr.shape[0] < k :
                 # augmente to k frames if embedding input is not enough
                 frames_embedding_arr = np.concatenate((frames_embedding_arr, frames_embedding_arr[:, :, ::-1, :]), axis=0)
@@ -76,9 +74,9 @@ def flow_from_dir(landmark_path, num_video, output_shape=None, batch_size=48, k=
             if len(frame) == batch_size:
                 frame_temp = np.array(frame) / 127.5 - 1
                 lndmk_temp = np.array(lndmk) / 127.5 - 1
-                styles_temp = np.array(styles) / 127.5 - 1
+                styles_temp = np.array(styles) / 127.5 - 1  # (BATCH_SIZE, k, H, W, 6)
                 if meta:
-#                    condition_temp = np.eye(num_video)[condition]
+#                    condition_temp = np.eye(num_video)[condition]  Causes memory error
                     condition_temp = utils.to_categorical(condition, num_classes=num_video)
                     condition = []
                 frame = []

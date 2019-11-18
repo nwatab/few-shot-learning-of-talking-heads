@@ -8,8 +8,7 @@ from keras_contrib.layers.normalization.instancenormalization import InstanceNor
 from keras_vggface.vggface import VGGFace
 import tensorflow as tf
 
-from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaIN, Bias, SelfAttention
-from utils import AdaInstanceNormalization
+from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaInstanceNormalization, Bias, SelfAttention
 
 
 class GAN:
@@ -43,6 +42,7 @@ class GAN:
         return x
 
     def resblock(self, x, channels, mean0, std0, mean1, std1):
+        """  channels doesn't change  """
         shortcut = x
 
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
@@ -55,9 +55,10 @@ class GAN:
         return x
 
     def resblock_d(self, x, channels, fm=None):
+        """  channels doesn't change  """
         shortcut = x
 
-        x = ReLU(name=fm)(x)
+        x = ReLU(name=fm)(x)  # Add preactivation ReLU to get feature matching activation layer
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         x = ReLU()(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
@@ -85,7 +86,7 @@ class GAN:
     def build_embedder(self, name='embedder'):
         h, w, c = self.input_shape
         
-        input_landmark_frame = Input(shape=(h, w, c * 2))  # [:,:,3:]: landmark; [:,:,4:]: frame
+        input_landmark_frame = Input(shape=(h, w, c * 2))  # [:,:,:3]: landmark; [:,:,3:]: frame
         hid = self.downsample(input_landmark_frame, 64)
         hid = self.downsample(hid, 128)
         hid = self.downsample(hid, 256)
@@ -99,49 +100,10 @@ class GAN:
         embedder = Model(inputs=input_landmark_frame, outputs=embedding, name=name)
         return embedder
 
-    def build_embedder_depricated(self):
-        """ k frames from the same sequence """
-        input_frames = Input(shape=(self.h, self.w, self.c * self.k))
-        input_landmarks = Input(shape=(self.h, self.w, self.c * self.k))
-
-        input_frames_splt = [Lambda(lambda x: x[:, :, :, 3*i:3*(i+1)])(input_frames) for i in range(self.k)]
-        input_landmarks_splt = [Lambda(lambda x: x[:,:, :, 3*i:3*(i+1)])(input_landmarks) for i in range(self.k)]
-        single_embedder = self.embed(name='single_embedder')
-        embedding_vectors = [single_embedder([frame, landmark]) for frame, landmark in zip(input_frames_splt, input_landmarks_splt)] # List of (BATCH_SIZE, 512,)
-        embedding_vectors = [Lambda(lambda x: K.expand_dims(x, axis=1))(vector) for vector in embedding_vectors]  # List of (BATCH_SIZE, 1, 512)
-        if self.k == 1:
-            embeddings = embedding_vectors[0]
-        else:
-            embeddings = Concatenate(axis=1)(embedding_vectors)  # (BATCH_SIZE, k, 512)
-        average_embedding = GlobalAveragePooling1D(name='average_embedding')(embeddings)  # (BATCH_SIZE, 512)
-        
-        embedder = Model(inputs=[input_frames, input_landmarks], outputs=average_embedding, name='embedder')
-        return embedder
-
     def build_generator(self):
         landmarks = Input(shape=self.input_shape, name='landmarks')
         style_embedding = Input(shape=(512,), name='style_embedding')
 
-        def get_adain_ix(l,):
-            adain_channels = [
-                # res block
-                (512, 512),
-                (512, 512),
-                (512, 512),
-                (512, 512),
-                # res up
-                (512, 256),
-                (512, 512),
-                (256, 128),
-                (128, 64),
-                (3, 3)
-            ]
-            prev_total=2*sum(list(sum(adain_channels, ()))[:2 * l])
-            return [(prev_total, prev_total + adain_channels[l][0]),
-                    (prev_total + adain_channels[l][0], prev_total +2 *  adain_channels[l][0]),
-                    (prev_total + 2 * adain_channels[l][0], prev_total + 2 * adain_channels[l][0] + adain_channels[l][1]),
-                    (prev_total + 2 * adain_channels[l][0] + adain_channels[l][1], prev_total + 2 * adain_channels[l][0] + 2 * adain_channels[l][1])
-            ]
         adain_param_length = 512*22+256*4+128*4+64*2+6
         adain_params = DenseSN(adain_param_length)(style_embedding)
         adain_params = Reshape((1, 1, adain_param_length))(adain_params)
@@ -292,7 +254,6 @@ class GAN:
         input_lndmk = Input(shape=self.input_shape, name='landmarks')
         condition = Input(shape=(self.num_videos,), name='condition')
         inputs_embedder = [Input((self.h, self.w, self.c * 2), name='style{}'.format(i)) for i in range(self.k)]  # (BATCH_SIZE, H, W, 6)
-        
         embeddings = [embedder(em_input) for em_input in inputs_embedder]  # (BATCH_SIZE, 512)
 
         if self.k > 1:
@@ -303,7 +264,6 @@ class GAN:
             average_embedding = embeddings[0]
 
         fake_frame = generator([input_lndmk, average_embedding])
-
         intermediate_vgg19_fakes = intermediate_vgg19(fake_frame)
         intermediate_vggface_fakes = intermediate_vggface(fake_frame)
         intermediate_discriminator_fakes = intermediate_discriminator([fake_frame, input_lndmk])
@@ -370,10 +330,3 @@ class GAN:
         intermediate_outputs = [vggface.get_layer(layer_name).output for layer_name in layer_names]
         self.intermediate_vggface = Model(vggface.input, intermediate_outputs, name='intermediate_vggface')
         return self.intermediate_vggface
-
-if __name__ == '__main__':
-    import numpy as np
-    from keras.optimizers import Adam
-    g = GAN((256,256,3),100,8)
-#    g.build_intermediate_vgg19_model()
-    g.compile_models()
