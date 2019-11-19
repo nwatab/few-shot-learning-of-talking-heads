@@ -19,7 +19,7 @@ def meta_learn():
     num_videos = 145008  # This is dividable by BATCH_SIZE. All data is 145520
     num_batches = num_videos // BATCH_SIZE
     epochs = 75
-    datapath = './datasets/voxceleb2-9f/train/lndmks'
+    datapath = '../few-shot-learning-of-talking-heads/datasets/voxceleb2-9f/train/lndmks'
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     with tf.device("/cpu:0"):

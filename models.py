@@ -28,11 +28,11 @@ class GAN:
         x = ReLU(name=fm)(x)
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same',)(x)
         if i_norm:
-            x = InstanceNormalization(axis=-1)(x)  # for generator
+            x = InstanceNormalization(axis=-1)(x)  # use in generator
         x = ReLU()(x)
         x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
         if i_norm:
-            x = InstanceNormalization(axis=-1)(x)  # for generator
+            x = InstanceNormalization(axis=-1)(x)  # use in generator
         x = AveragePooling2D(pool_size=(2, 2))(x)
 
         shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer = 'he_normal')(shortcut)
@@ -58,7 +58,7 @@ class GAN:
         """  channels doesn't change  """
         shortcut = x
 
-        x = ReLU(name=fm)(x)  # Add ReLU for to get feature matching activation layer
+        x = ReLU(name=fm)(x)  # Add preactivation ReLU to get feature matching activation layer
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
         x = ReLU()(x)
         x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
@@ -255,6 +255,7 @@ class GAN:
         condition = Input(shape=(self.num_videos,), name='condition')
         inputs_embedder = [Input((self.h, self.w, self.c * 2), name='style{}'.format(i)) for i in range(self.k)]  # (BATCH_SIZE, H, W, 6)
         embeddings = [embedder(em_input) for em_input in inputs_embedder]  # (BATCH_SIZE, 512)
+
         if self.k > 1:
             embeddings_expand = [Lambda(lambda x: K.expand_dims(x, axis=1))(embedding) for embedding in embeddings]  # (BATCH_SIZE, 1, 512)
             embedding_k = Concatenate(axis=1)(embeddings_expand)  # (BATCH_SIZE, K, 512)

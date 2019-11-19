@@ -21,7 +21,7 @@ def fewshot_learn():
     num_batches = 1
     epochs = 40
     dataname = 'monalisa'
-    datapath = './datasets/fewshot/' + dataname + '/lndmks'
+    datapath = '../few-shot-learning-of-talking-heads/datasets/fewshot/' + dataname + '/lndmks'
 
     gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
     with tf.device("/cpu:0"):
@@ -43,15 +43,18 @@ def fewshot_learn():
             valid = np.ones((frames.shape[0], 1))
             invalid = - valid
 
-            intermediate_vgg19_reals = intermediate_vgg19.predict_on_batch(frames)
-            intermediate_vggface_reals = intermediate_vggface.predict_on_batch(frames)
-            intermediate_discriminator_reals = intermediate_discriminator.predict_on_batch([frames, landmarks])
+            intermediate_vgg19_outputs = intermediate_vgg19.predict_on_batch(frames)
+            intermediate_vggface_outputs =intermediate_vggface.predict_on_batch(frames)
+            intermediate_discriminator_outputs = intermediate_discriminator.predict_on_batch([frames, landmarks])
 
             style_list = [styles[:, i, :, :, :] for i in range(k)]
-
+            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
+            average_embedding = np.mean(np.array(embeddings_list), axis=0)
+            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
+            
             g_loss = combined_to_train.train_on_batch(
                 [landmarks] + style_list,
-                intermediate_vgg19_reals + intermediate_vggface_reals + [valid] + intermediate_discriminator_reals
+                intermediate_vgg19_outputs + intermediate_vggface_outputs + [valid] + intermediate_discriminator_outputs
             )
 
             embeddings_list = [embedder.predict_on_batch(style) for style in style_list]

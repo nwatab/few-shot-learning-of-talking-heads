@@ -13,4 +13,3 @@ module load nccl/2.4/2.4.7-1
 source ~/dl/bin/activate
 
 python fewshot_learning.py
-

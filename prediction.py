@@ -36,6 +36,7 @@ def predict(lndmk_image_paths, style_frame_paths, style_lndmk_paths):
 
 if __name__ == '__main__':
     frame_shape = (256, 256, 3)
+
     lndmk_file_paths = ['datasets/voxceleb2-9f/train/lndmks/id00012/21Uxsk56VDQ/{}.jpg'.format(i) for i in range(8)]
     style_frame_paths = ['datasets/fewshot/monalisa/frames/monalisa256-0.jpg']
     style_lndmk_paths = ['datasets/fewshot/monalisa/lndmks/monalisa256-0.jpg']
