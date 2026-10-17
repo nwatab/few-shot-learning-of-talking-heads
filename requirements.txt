@@ -1,11 +1,5 @@
-tensorflow==1.14.0
-keras==2.2.4
-keras-applications==1.0.8
-keras-preprocessing==1.1.0
-keras-vggface==0.6
-https://github.com/keras-team/keras-contrib/archive/3fc5ef709e061416f4bc8a92ca3750c824b5d2b0.zip
-h5py==2.10.0
-numpy==1.16.6
-imageio==2.9.0
-scikit-image==0.16.2
-pillow==8.4.0
+tensorflow>=2.16
+keras>=3.3
+numpy
+pillow
+h5py
