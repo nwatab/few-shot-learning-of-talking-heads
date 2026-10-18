@@ -3,7 +3,7 @@ import os
 
 import numpy as np
 import imageio
-import skimage
+import skimage.transform
 
 from models import GAN
 

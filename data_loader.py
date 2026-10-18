@@ -1,6 +1,6 @@
 import os
 import imageio
-import skimage
+import skimage.transform
 from keras import utils
 import numpy as np
 
