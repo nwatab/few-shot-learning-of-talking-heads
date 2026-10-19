@@ -1,95 +1,66 @@
-import keras.backend as K
-from keras.utils import np_utils, multi_gpu_model
-import numpy as np
-import tensorflow as tf
+"""Meta-learning stage (Section 3.2) on VoxCeleb-style data.
 
-from data_loader import flow_from_dir
-from models import GAN
-#from xla_multi_gpu_utils import multi_gpu_model
-
+    python meta_learning.py --data datasets/voxceleb2-9f/train --out trained_models
+"""
+import argparse
+import json
 import logging
 import os
+import time
+
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+
+import tensorflow as tf
+
+from data_loader import EpisodeSampler
+from models import Config
+from trainer import TalkingHeadGAN
 
 
-def meta_learn():
-    k = 8
-    frame_shape = h, w, c = (256, 256, 3)
-    input_embedder_shape = (h, w, k * c)
-    BATCH_SIZE = 12
-    num_videos = 145008  # This is dividable by BATCH_SIZE. All data is 145520
-    num_batches = num_videos // BATCH_SIZE
-    epochs = 75
-    datapath = '../few-shot-learning-of-talking-heads/datasets/voxceleb2-9f/train/lndmks'
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--data', required=True, help='directory containing frames/ and lndmks/')
+    ap.add_argument('--out', default='trained_models')
+    ap.add_argument('--size', type=int, default=256)
+    ap.add_argument('--width', type=int, default=64)
+    ap.add_argument('--k', type=int, default=8)
+    ap.add_argument('--batch', type=int, default=12)
+    ap.add_argument('--epochs', type=int, default=75)
+    ap.add_argument('--lr-g', type=float, default=5e-5)
+    ap.add_argument('--lr-d', type=float, default=2e-4)
+    ap.add_argument('--save-every', type=int, default=1000, help='steps')
+    ap.add_argument('--log-every', type=int, default=50, help='steps')
+    ap.add_argument('--resume', default=None, help='checkpoint tag in --out to resume from')
+    ap.add_argument('--vgg19-weights', default=None)
+    ap.add_argument('--vggface-weights', default=None)
+    ap.add_argument('--legacy', action='store_true', help='reproduce the original (broken) behaviour')
+    a = ap.parse_args()
 
-    gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
-    with tf.device("/cpu:0"):
-        combined_to_train, combined, discriminator_to_train, discriminator = gan.compile_models(meta=True, gpus=0)
-        embedder = gan.embedder
-        generator = gan.generator
-        intermediate_vgg19 = gan.intermediate_vgg19
-        intermediate_vggface = gan.intermediate_vggface
-        intermediate_discriminator = gan.intermediate_discriminator
-        embedding_discriminator = gan.embedding_discriminator
+    os.makedirs(a.out, exist_ok=True)
+    logging.basicConfig(filename=os.path.join(a.out, 'meta_learning.log'), level=logging.INFO,
+                        format='%(asctime)s:%(levelname)s:%(message)s')
+    cfg = (Config.legacy if a.legacy else Config.fixed)(image_size=a.size, width=a.width, k=a.k)
+    sampler = EpisodeSampler(a.data, a.size, a.k, a.batch, random_frames=cfg.random_frames)
+    logging.info('config %s; %d videos', cfg, len(sampler))
+    gan = TalkingHeadGAN(cfg, len(sampler), lr_g=a.lr_g, lr_d=a.lr_d,
+                         vgg19_weights=a.vgg19_weights, vggface_weights=a.vggface_weights)
+    if a.resume:
+        gan.load(a.out, a.resume)
 
-    logger.info('==== discriminator ===')
-    discriminator.summary(print_fn=logger.info)
-    logger.info('=== generator ===')
-    combined.get_layer('generator').summary(print_fn=logger.info)
-    logger.info('=== embedder ===')
-    combined.get_layer('embedder').summary(print_fn=logger.info)
-    combined.summary(print_fn=logger.info)
+    step, t0 = 0, time.time()
+    for epoch in range(a.epochs):
+        for frames, lmks, styles, idx in sampler.epoch():
+            m = gan.train_step(tf.constant(frames), tf.constant(lmks), tf.constant(styles), tf.constant(idx))
+            if step % a.log_every == 0:
+                rec = {k: round(float(v), 5) for k, v in m.items()}
+                rec.update(epoch=epoch, step=step, sec=round(time.time() - t0, 1))
+                logging.info(json.dumps(rec))
+            step += 1
+            if step % a.save_every == 0:
+                gan.save(a.out, 'latest')
+        gan.save(a.out, f'epoch{epoch:03d}')
+        gan.save(a.out, 'latest')
 
-    for epoch in range(epochs):
-        logger.info(('Epoch: ', epoch))
-        for batch_ix, (frames, landmarks, styles, condition) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k)):
-            if batch_ix == num_batches:
-                break
-            valid = np.ones((frames.shape[0], 1))
-            invalid = - valid
 
-            intermediate_vgg19_reals = intermediate_vgg19.predict_on_batch(frames)
-            intermediate_vggface_reals = intermediate_vggface.predict_on_batch(frames)
-            intermediate_discriminator_reals = intermediate_discriminator.predict_on_batch([frames, landmarks])
-
-            style_list = [styles[:, i, :, :, :] for i in range(k)]
-
-            w_i = embedding_discriminator.predict_on_batch(condition)
-
-            g_loss = combined_to_train.train_on_batch(
-                [landmarks] + style_list + [condition],
-                intermediate_vgg19_reals + intermediate_vggface_reals + [valid] + intermediate_discriminator_reals + [w_i] * k
-            )
-
-            d_loss_real = discriminator_to_train.train_on_batch(
-                [frames, landmarks, condition],
-                [valid]
-            )
-
-            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
-            average_embedding = np.mean(np.array(embeddings_list), axis=0)
-            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
-            d_loss_fake = discriminator_to_train.train_on_batch(
-                [fake_frames, landmarks, condition],
-                [invalid]
-            )
-            logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
-
-            if batch_ix % 100 == 0 and batch_ix > 0:
-                # Save whole model
-                # combined.save('trained_models/{}_meta_combined.h5'.format(epoch))
-                # discriminator.save('trained_models/{}_meta_discriminator.h5'.format(epoch))
-
-                # Save weights only
-#                combined.save_weights('trained_models/{}_meta_combined_weights.h5'.format(epoch))
-                combined.get_layer('generator').save_weights('trained_models/{}_meta_generator_in_combined.h5'.format(epoch))
-                combined.get_layer('embedder').save_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(epoch))
-                discriminator.save_weights('trained_models/{}_meta_discriminator_weights.h5'.format(epoch))
-                logger.info('Checkpoint saved at Epoch: {}; batch_ix: {}'.format(epoch, batch_ix))
-        print()
-    
 if __name__ == '__main__':
-    LOG_FILE = 'logs/meta_learning2.log'
-    fmt = "%(asctime)s:%(levelname)s:%(name)s:%(message)s"
-    logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=fmt)
-    logger = logging.getLogger(__name__)
-    meta_learn()
+    main()

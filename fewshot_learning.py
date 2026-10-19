@@ -1,92 +1,69 @@
-import logging
+"""Few-shot fine-tuning on a new identity (Section 3.3).
+
+    python fewshot_learning.py --data datasets/fewshot/monalisa \
+        --meta-dir trained_models --meta-tag latest --out trained_models/monalisa
+
+--data must contain frames/ and lndmks/ with the same file names (T images).
+"""
+import argparse
 import os
 
-from keras.optimizers import Adam
-from keras.utils import multi_gpu_model
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+
 import numpy as np
 import tensorflow as tf
 
-from models import GAN
-from data_loader import flow_from_dir
+from data_loader import index_videos, load_image
+from models import Config
+from trainer import FewShotFinetuner, TalkingHeadGAN
 
 
-def fewshot_learn():
-    metalearning_epoch=0
-    BATCH_SIZE = 1
-    k = 1
-    frame_shape = h, w, c = (256, 256, 3)
-    input_embedder_shape = (h, w, k * c)
-    BATCH_SIZE = 1
-    num_videos = 1
-    num_batches = 1
-    epochs = 40
-    dataname = 'monalisa'
-    datapath = '../few-shot-learning-of-talking-heads/datasets/fewshot/' + dataname + '/lndmks'
+def load_person(root, size):
+    (lmk_dir, frm_dir, files), = index_videos(root)
+    frames = np.stack([load_image(os.path.join(frm_dir, f), size) for f in files])
+    lmks = np.stack([load_image(os.path.join(lmk_dir, f), size) for f in files])
+    return frames, lmks
 
-    gan = GAN(input_shape=frame_shape, num_videos=num_videos, k=k)
-    with tf.device("/cpu:0"):
-        combined_to_train, combined, discriminator_to_train, discriminator = gan.compile_models(meta=False, gpus=0)
-        embedder = gan.embedder
-        generator = gan.generator
-        intermediate_vgg19 = gan.intermediate_vgg19
-        intermediate_vggface = gan.intermediate_vggface
-        intermediate_discriminator = gan.intermediate_discriminator
 
-    discriminator.load_weights('trained_models/{}_meta_discriminator_weights.h5'.format(metalearning_epoch), by_name=True, skip_mismatch=True)
-    combined.get_layer('embedder').load_weights('trained_models/{}_meta_embedder_in_combined.h5'.format(metalearning_epoch))
-    combined.get_layer('generator').load_weights('trained_models/{}_meta_generator_in_combined.h5'.format(metalearning_epoch))
-    
-    for epoch in range(epochs):
-        for batch_ix, (frames, landmarks, styles) in enumerate(flow_from_dir(datapath, num_videos, (h, w), BATCH_SIZE, k, meta=False)):
-            if batch_ix == num_batches:
-                break
-            valid = np.ones((frames.shape[0], 1))
-            invalid = - valid
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--data', required=True)
+    ap.add_argument('--meta-dir', required=True)
+    ap.add_argument('--meta-tag', default='latest')
+    ap.add_argument('--out', required=True)
+    ap.add_argument('--size', type=int, default=256)
+    ap.add_argument('--width', type=int, default=64)
+    ap.add_argument('--epochs', type=int, default=40)
+    ap.add_argument('--batch', type=int, default=1)
+    ap.add_argument('--lr-g', type=float, default=5e-5)
+    ap.add_argument('--lr-d', type=float, default=2e-4)
+    ap.add_argument('--vgg19-weights', default=None)
+    ap.add_argument('--vggface-weights', default=None)
+    ap.add_argument('--legacy', action='store_true')
+    a = ap.parse_args()
 
-            intermediate_vgg19_outputs = intermediate_vgg19.predict_on_batch(frames)
-            intermediate_vggface_outputs =intermediate_vggface.predict_on_batch(frames)
-            intermediate_discriminator_outputs = intermediate_discriminator.predict_on_batch([frames, landmarks])
+    frames, lmks = load_person(a.data, a.size)
+    t = len(frames)
+    cfg = (Config.legacy if a.legacy else Config.fixed)(image_size=a.size, width=a.width, k=t)
+    gan = TalkingHeadGAN(cfg, num_videos=1, vgg19_weights=a.vgg19_weights, vggface_weights=a.vggface_weights)
+    gan.load(a.meta_dir, a.meta_tag, load_W=False)
 
-            style_list = [styles[:, i, :, :, :] for i in range(k)]
-            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
-            average_embedding = np.mean(np.array(embeddings_list), axis=0)
-            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
-            
-            g_loss = combined_to_train.train_on_batch(
-                [landmarks] + style_list,
-                intermediate_vgg19_outputs + intermediate_vggface_outputs + [valid] + intermediate_discriminator_outputs
-            )
+    styles = np.concatenate([lmks, frames], axis=-1)[None]          # (1, T, S, S, 6)
+    ft = FewShotFinetuner(gan, tf.constant(styles), lr_g=a.lr_g, lr_d=a.lr_d)
+    rng = np.random.default_rng(0)
+    for epoch in range(a.epochs):
+        order = rng.permutation(t)
+        for i in range(0, t - a.batch + 1, a.batch):
+            idx = order[i:i + a.batch]
+            m = ft.train_step(tf.constant(frames[idx]), tf.constant(lmks[idx]))
+        print(epoch, {k: round(float(v), 4) for k, v in m.items()}, flush=True)
 
-            embeddings_list = [embedder.predict_on_batch(style) for style in style_list]
-            average_embedding = np.mean(np.array(embeddings_list), axis=0)
+    os.makedirs(a.out, exist_ok=True)
+    gan.G.save_weights(os.path.join(a.out, 'G.weights.h5'))
+    gan.D.save_weights(os.path.join(a.out, 'D.weights.h5'))
+    np.save(os.path.join(a.out, 'psi.npy'), ft.psi.numpy())
+    np.save(os.path.join(a.out, 'w_prime.npy'), ft.w_prime.numpy())
 
-            d_loss_real = discriminator_to_train.train_on_batch(
-                [frames, landmarks, average_embedding],
-                [valid]
-            )
-            
-            fake_frames = generator.predict_on_batch([landmarks, average_embedding])
 
-            d_loss_fake = discriminator_to_train.train_on_batch(
-                [fake_frames, landmarks, average_embedding],
-                [invalid]
-            )
-            logger.info((epoch, batch_ix, g_loss, (d_loss_real, d_loss_fake)))
-
-    # Save whole model
-#    combined.save('trained_models/{}_fewshot_combined.h5'.format(dataname))
-#    discriminator.save('trained_models/{}_fewshot_discriminator.h5'.format(dataname))
-
-    # Save weights only
-#    combined.save_weights('trained_models/{}_fewshot_combined_weights.h5'.format(dataname))
-    combined.get_layer('generator').save_weights('trained_models/{}_fewshot_generator_in_combined.h5'.format(dataname))
-#    combined.get_layer('embedder').save_weights('trained_models/{}_fewshot_embedder_in_combined.h5'.format(dataname))
-    discriminator.save_weights('trained_models/{}_fewshot_discriminator_weights.h5'.format(dataname))
-        
-
-if __name__=='__main__':
-    LOG_FILE = 'logs/fewshot_learning.log'
-    fmt = "%(asctime)s:%(levelname)s:%(name)s: %(message)s"
-    logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format=fmt)
-    logger = logging.getLogger(__name__)
-    fewshot_learn()
+if __name__ == '__main__':
+    main()

@@ -1,303 +1,98 @@
-import tensorflow as tf
-from keras.engine import Layer, InputSpec
-from keras import backend as K
-from keras.layers import Conv2D, Dense, Flatten
-from keras.layers.pooling import _GlobalPooling2D
+"""Custom layers (Keras 3, TensorFlow backend)."""
+import keras
+from keras import layers, ops
 
 
-class AdaInstanceNormalization(Layer):
-    """ Input b and g should be 1x1xC """
-    def __init__(self, 
-             axis=-1,
-             momentum=0.99,
-             epsilon=1e-5,
-             center=True,
-             scale=True,
-             **kwargs):
-        super(AdaInstanceNormalization, self).__init__(**kwargs)
-        self.axis = axis
-        self.momentum = momentum
-        self.epsilon = epsilon
-        self.center = center
-        self.scale = scale
-    
-    def build(self, input_shape):    
-        super(AdaInstanceNormalization, self).build(input_shape) 
-    
-    def call(self, inputs, training=None):
-        content, style_mean, style_std = inputs[0], inputs[1], inputs[2]
-        input_shape = K.int_shape(content)
-        reduction_axes = [1, 2]
-        content_mean, content_var = tf.nn.moments(content, reduction_axes, keep_dims=True)
-        stylized_content = tf.nn.batch_normalization(content,
-                                        content_mean,
-                                        content_var,
-                                        style_mean,
-                                        style_std,
-                                        self.epsilon)
-        return stylized_content
-    
-    def get_config(self):
-        config = {
-            'axis': self.axis,
-            'momentum': self.momentum,
-            'epsilon': self.epsilon,
-            'center': self.center,
-            'scale': self.scale
-        }
-        base_config = super(AdaInstanceNormalization, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-    
-    def compute_output_shape(self, input_shape):
-        content_shape = input_shape[0]
-        return content_shape
+def conv_sn(filters, kernel_size, **kwargs):
+    """Spectrally normalised Conv2D (Miyato et al. 2018)."""
+    kwargs.setdefault('padding', 'same')
+    kwargs.setdefault('kernel_initializer', 'he_normal')
+    return layers.SpectralNormalization(layers.Conv2D(filters, kernel_size, **kwargs))
 
 
-class DenseSN(Dense):
-    """ Borrowed from https://github.com/IShengFang/SpectralNormalizationKeras """
-    def __init__(self, units, **kwargs):
-        super(DenseSN, self).__init__(units, **kwargs)
-        
-    def build(self, input_shape):
-        assert len(input_shape) >= 2
-        input_dim = input_shape[-1]
-        self.kernel = self.add_weight(shape=(input_dim, self.units),
-                                      initializer=self.kernel_initializer,
-                                      name='kernel',
-                                      regularizer=self.kernel_regularizer,
-                                      constraint=self.kernel_constraint)
-        if self.use_bias:
-            self.bias = self.add_weight(shape=(self.units,),
-                                        initializer=self.bias_initializer,
-                                        name='bias',
-                                        regularizer=self.bias_regularizer,
-                                        constraint=self.bias_constraint)
-        else:
-            self.bias = None
-        self.u = self.add_weight(shape=tuple([1, self.kernel.shape.as_list()[-1]]),
-                                 initializer=initializers.RandomNormal(0, 1),
-                                 name='sn',
-                                 trainable=False)
-        self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
-        self.built = True
+def dense_sn(units, **kwargs):
+    return layers.SpectralNormalization(layers.Dense(units, **kwargs))
 
-    def call(self, inputs, training=None):
-        def _l2normalize(v, eps=1e-5):
-            return v / (K.sum(v ** 2) ** 0.5 + eps)
-        def power_iteration(W, u):
-            _u = u
-            _v = _l2normalize(K.dot(_u, K.transpose(W)))
-            _u = _l2normalize(K.dot(_v, W))
-            return _u, _v
-        W_shape = self.kernel.shape.as_list()
-        #Flatten the Tensor
-        W_reshaped = K.reshape(self.kernel, [-1, W_shape[-1]])
-        _u, _v = power_iteration(W_reshaped, self.u)
-        #Calculate Sigma
-        sigma=K.dot(_v, W_reshaped)
-        sigma=K.dot(sigma, K.transpose(_u))
-        #normalize it
-        W_bar = W_reshaped / sigma
-        #reshape weight tensor
-        if training in {0, False}:
-            W_bar = K.reshape(W_bar, W_shape)
-        else:
-            with tf.control_dependencies([self.u.assign(_u)]):
-                 W_bar = K.reshape(W_bar, W_shape)  
-        output = K.dot(inputs, W_bar)
-        if self.use_bias:
-            output = K.bias_add(output, self.bias, data_format='channels_last')
-        if self.activation is not None:
-            output = self.activation(output)
-        return output 
 
-                          
-class ConvSN2D(Conv2D):
-    """ Borrowed from https://github.com/IShengFang/SpectralNormalizationKeras """
-    def __init__(self, filters, kernel_size, **kwargs):
-        super(ConvSN2D, self).__init__(filters, kernel_size, **kwargs)
+def instance_norm():
+    # GroupNormalization with groups=-1 is InstanceNormalization (affine).
+    return layers.GroupNormalization(groups=-1, epsilon=1e-5)
 
-    def build(self, input_shape):
-        if self.data_format == 'channels_first':
-            channel_axis = 1
-        else:
-            channel_axis = -1
-        if input_shape[channel_axis] is None:
-            raise ValueError('The channel dimension of the inputs '
-                             'should be defined. Found `None`.')
-        input_dim = input_shape[channel_axis]
-        kernel_shape = self.kernel_size + (input_dim, self.filters)
 
-        self.kernel = self.add_weight(shape=kernel_shape,
-                                      initializer=self.kernel_initializer,
-                                      name='kernel',
-                                      regularizer=self.kernel_regularizer,
-                                      constraint=self.kernel_constraint,
-                                      trainable=True)
+@keras.saving.register_keras_serializable(package='talking_heads')
+class AdaIN(layers.Layer):
+    """Adaptive instance normalisation.
 
-        if self.use_bias:
-            self.bias = self.add_weight(shape=(self.filters,),
-                                        initializer=self.bias_initializer,
-                                        name='bias',
-                                        regularizer=self.bias_regularizer,
-                                        constraint=self.bias_constraint,
-                                        trainable=True)
-        else:
-            self.bias = None
-            
-        self.u = self.add_weight(shape=tuple([1, self.kernel.shape.as_list()[-1]]),
-                         initializer=initializers.RandomNormal(0, 1),
-                         name='sn',
-                         trainable=False)
-        
-        # Set input spec.
-        self.input_spec = InputSpec(ndim=self.rank + 2,
-                                    axes={channel_axis: input_dim})
-        self.built = True
+    y = scale * (x - mean_hw(x)) / sqrt(var_hw(x) + eps) + shift
 
-    def call(self, inputs, training=None):
-        def _l2normalize(v, eps=1e-5):
-            return v / K.sqrt(K.sum(K.square(v)) + eps)
-        def power_iteration(W, u):
-            #Accroding the paper, we only need to do power iteration one time.
-            _u = u
-            _v = _l2normalize(K.dot(_u, K.transpose(W)))
-            _u = _l2normalize(K.dot(_v, W))
-            return _u, _v
-        #Spectral Normalization
-        W_shape = self.kernel.shape.as_list()
-        #Flatten the Tensor
-        W_reshaped = K.reshape(self.kernel, [-1, W_shape[-1]])
-        _u, _v = power_iteration(W_reshaped, self.u)
-        #Calculate Sigma
-        sigma = K.dot(_v, W_reshaped)
-        sigma = K.dot(sigma, K.transpose(_u))
-        #normalize it
-        W_bar = W_reshaped / sigma
-        #reshape weight tensor
-        if training in {0, False}:
-            W_bar = K.reshape(W_bar, W_shape)
-        else:
-            with tf.control_dependencies([self.u.assign(_u)]):
-                W_bar = K.reshape(W_bar, W_shape)
+    ``scale`` and ``shift`` have shape (B, C) and are produced from the
+    identity embedding by the generator's projection matrix P.
 
-        outputs = K.conv2d(
-                inputs,
-                W_bar,
-                strides=self.strides,
-                padding=self.padding,
-                data_format=self.data_format,
-                dilation_rate=self.dilation_rate)
-        if self.use_bias:
-            outputs = K.bias_add(
-                outputs,
-                self.bias,
-                data_format=self.data_format)
-        if self.activation is not None:
-            return self.activation(outputs)
-        return outputs
-
-                          
-class GlobalSumPooling2D(_GlobalPooling2D):
-    """Global sum pooling operation for spatial data.
-    # Arguments
-        data_format: A string,
-            one of `channels_last` (default) or `channels_first`.
-            The ordering of the dimensions in the inputs.
-            `channels_last` corresponds to inputs with shape
-            `(batch, height, width, channels)` while `channels_first`
-            corresponds to inputs with shape
-            `(batch, channels, height, width)`.
-            It defaults to the `image_data_format` value found in your
-            Keras config file at `~/.keras/keras.json`.
-            If you never set it, then it will be "channels_last".
-    # Input shape
-        - If `data_format='channels_last'`:
-            4D tensor with shape:
-            `(batch_size, rows, cols, channels)`
-        - If `data_format='channels_first'`:
-            4D tensor with shape:
-            `(batch_size, channels, rows, cols)`
-    # Output shape
-        2D tensor with shape:
-        `(batch_size, channels)`
+    If ``residual_scale`` is True the layer applies ``1 + scale`` instead of
+    ``scale``. With the raw parameterisation an embedding near zero makes the
+    scale near zero, which zeroes every residual branch and the gradients that
+    flow through it (this was the failure mode of the original
+    implementation). With ``1 + scale`` an embedding near zero degrades
+    gracefully to plain instance normalisation.
     """
+
+    def __init__(self, residual_scale=True, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.residual_scale = residual_scale
+        self.epsilon = epsilon
 
     def call(self, inputs):
-        if self.data_format == 'channels_last':
-            return K.sum(inputs, axis=[1, 2])
-        else:
-            return K.sum(inputs, axis=[2, 3])
+        x, shift, scale = inputs
+        mean = ops.mean(x, axis=(1, 2), keepdims=True)
+        var = ops.var(x, axis=(1, 2), keepdims=True)
+        x = (x - mean) / ops.sqrt(var + self.epsilon)
+        scale = ops.expand_dims(ops.expand_dims(scale, 1), 1)
+        shift = ops.expand_dims(ops.expand_dims(shift, 1), 1)
+        if self.residual_scale:
+            scale = 1.0 + scale
+        return scale * x + shift
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update(residual_scale=self.residual_scale, epsilon=self.epsilon)
+        return cfg
 
 
-from keras.engine.topology import Layer
-from keras import initializers
+@keras.saving.register_keras_serializable(package='talking_heads')
+class SelfAttention(layers.Layer):
+    """SAGAN self-attention block; gamma starts at 0 so the block is an identity at init."""
 
-
-class Bias(Layer):
-    """
-    Custom keras layer that simply adds a scalar bias to each location in the input
-    """
-    
-    def __init__(self, initializer='zeros', **kwargs):
-        super(Bias, self).__init__(**kwargs)
-        self.initializer = initializer
-    
-    def build(self, input_shape):
-        self.bias = self.add_weight(name='{}_W'.format(self.name), shape=(input_shape[-1],), initializer=self.initializer)
-        super(Bias, self).build(input_shape)
-    
-    def call(self, x):
-        return K.bias_add(x, self.bias, data_format='channels_last')
-
-                          
-class SelfAttention(Layer):
-    def __init__(self, channels, kernel_initializer='he_normal', **kwargs):
-        super(SelfAttention, self).__init__(**kwargs)
+    def __init__(self, channels, **kwargs):
+        super().__init__(**kwargs)
         self.channels = channels
-        self.filters_f_g = self.channels // 8
-        self.filters_h = self.channels
-        self.kernel_initializer = kernel_initializer
+        self.f = layers.Conv2D(max(channels // 8, 1), 1)
+        self.g = layers.Conv2D(max(channels // 8, 1), 1)
+        self.h = layers.Conv2D(channels, 1)
 
     def build(self, input_shape):
-        kernel_shape_f_g = (1, 1) + (self.channels, self.filters_f_g)
-        kernel_shape_h   = (1, 1) + (self.channels, self.filters_h)
-
-        # Create a trainable weight variable for this layer:
-        self.gamma = self.add_weight(name='gamma', shape=[1],    initializer='zeros', trainable=True)
-        self.kernel_f = self.add_weight(shape=kernel_shape_f_g,  initializer=self.kernel_initializer, name='kernel_f')
-        self.kernel_g = self.add_weight(shape=kernel_shape_f_g,  initializer=self.kernel_initializer, name='kernel_g')
-        self.kernel_h = self.add_weight(shape=kernel_shape_h,    initializer=self.kernel_initializer, name='kernel_h')
-        self.bias_f = self.add_weight(shape=(self.filters_f_g,), initializer='zeros', name='bias_f')
-        self.bias_g = self.add_weight(shape=(self.filters_f_g,), initializer='zeros', name='bias_g')
-        self.bias_h = self.add_weight(shape=(self.filters_h,),   initializer='zeros', name='bias_h')
-
-        # Set input spec.
-        self.input_spec = InputSpec(ndim=4, axes={3: input_shape[-1]})
-        super(SelfAttention, self).build(input_shape)
+        self.f.build(input_shape)
+        self.g.build(input_shape)
+        self.h.build(input_shape)
+        self.gamma = self.add_weight(name='gamma', shape=(1,), initializer='zeros')
 
     def call(self, x):
-        def hw_flatten(x):
-            x_shape = K.shape(x)
-            return K.reshape(x, shape=[x_shape[0], x_shape[1] * x_shape[2], x_shape[-1]])
+        b = ops.shape(x)[0]
+        hh, ww, c = x.shape[1], x.shape[2], x.shape[3]
+        n = hh * ww
+        f = ops.reshape(self.f(x), (b, n, -1))
+        g = ops.reshape(self.g(x), (b, n, -1))
+        h = ops.reshape(self.h(x), (b, n, c))
+        beta = ops.softmax(ops.matmul(g, ops.transpose(f, (0, 2, 1))), axis=-1)
+        o = ops.reshape(ops.matmul(beta, h), (b, hh, ww, c))
+        return x + self.gamma * o
 
-        f = K.conv2d(x, kernel=self.kernel_f, strides=(1, 1), padding='same')  # [bs, h, w, c']
-        f = K.bias_add(f, self.bias_f)
-        g = K.conv2d(x, kernel=self.kernel_g, strides=(1, 1), padding='same')  # [bs, h, w, c']
-        g = K.bias_add(g, self.bias_g)
-        h = K.conv2d(x, kernel=self.kernel_h, strides=(1, 1), padding='same')  # [bs, h, w, c]
-        h = K.bias_add(h, self.bias_h)
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update(channels=self.channels)
+        return cfg
 
-        s = tf.matmul(hw_flatten(g), hw_flatten(f), transpose_b=True)  # # [bs, N, N]
 
-        beta = K.softmax(s, axis=-1)  # attention map
-
-        o = K.batch_dot(beta, hw_flatten(h))  # [bs, N, C]
-
-        o = K.reshape(o, shape=K.shape(x))  # [bs, h, w, C]
-        x += self.gamma * o
-
-        return x
-
-    def compute_output_shape(self, input_shape):
-        return input_shape
+@keras.saving.register_keras_serializable(package='talking_heads')
+class GlobalSumPooling2D(layers.Layer):
+    def call(self, x):
+        return ops.sum(x, axis=(1, 2))

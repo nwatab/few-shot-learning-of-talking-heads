@@ -1,50 +1,59 @@
-import logging
+"""Render frames for a sequence of landmark images.
+
+Fine-tuned identity (output of fewshot_learning.py):
+    python prediction.py --finetuned trained_models/monalisa --landmarks lm/*.jpg --out results
+
+Meta-learned model only (embed the given source frames, no fine-tuning):
+    python prediction.py --meta-dir trained_models --meta-tag latest \
+        --source-frames f0.jpg f1.jpg --source-landmarks l0.jpg l1.jpg --landmarks lm/*.jpg --out results
+"""
+import argparse
 import os
 
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+
 import numpy as np
-import imageio
-import skimage.transform
+from PIL import Image
 
-from models import GAN
+from data_loader import load_image
+from models import Config, build_embedder, build_generator, build_projector
 
 
-def load_image(path, shape):
-    img = imageio.imread(path)
-    resized_img = skimage.transform.resize(img, shape, preserve_range=True)
-    rescaled_img = resized_img / 127.5 - 1
-    return rescaled_img
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--landmarks', nargs='+', required=True)
+    ap.add_argument('--out', required=True)
+    ap.add_argument('--finetuned', default=None)
+    ap.add_argument('--meta-dir', default=None)
+    ap.add_argument('--meta-tag', default='latest')
+    ap.add_argument('--source-frames', nargs='*', default=[])
+    ap.add_argument('--source-landmarks', nargs='*', default=[])
+    ap.add_argument('--size', type=int, default=256)
+    ap.add_argument('--width', type=int, default=64)
+    ap.add_argument('--legacy', action='store_true')
+    a = ap.parse_args()
 
-def predict(lndmk_image_paths, style_frame_paths, style_lndmk_paths):
-    frame_shape = (256, 256, 3)
-    lndmk_images = np.array([load_image(path, frame_shape) for path in lndmk_image_paths])
-    batch_size = lndmk_images.shape[0]
-    style_frame_images = np.array([load_image(path, frame_shape) for path in style_frame_paths])
-    style_lndmk_images = np.array([load_image(path, frame_shape) for path in style_lndmk_paths])
-    style = np.concatenate((style_lndmk_images, style_frame_images), axis=-1)
+    cfg = (Config.legacy if a.legacy else Config.fixed)(image_size=a.size, width=a.width)
+    G = build_generator(cfg)
+    lmks = np.stack([load_image(p, a.size) for p in a.landmarks])
+    if a.finetuned:
+        G.load_weights(os.path.join(a.finetuned, 'G.weights.h5'))
+        psi = np.load(os.path.join(a.finetuned, 'psi.npy'))[:1]
+    else:
+        assert a.meta_dir and a.source_frames and len(a.source_frames) == len(a.source_landmarks)
+        E, P = build_embedder(cfg), build_projector(cfg)
+        for name, m in (('E', E), ('P', P), ('G', G)):
+            m.load_weights(os.path.join(a.meta_dir, f'{a.meta_tag}_{name}.weights.h5'))
+        style = np.stack([np.concatenate([load_image(l, a.size), load_image(f, a.size)], -1)
+                          for f, l in zip(a.source_frames, a.source_landmarks)])
+        psi = P.predict(E.predict(style, verbose=0).mean(0, keepdims=True), verbose=0)
 
-    gan = GAN(input_shape=frame_shape, num_videos=1, k=1)
-    gene = gan.build_generator()
-    embe = gan.build_embedder()
+    fake = G.predict([lmks, np.repeat(psi, len(lmks), axis=0)], verbose=0)
+    os.makedirs(a.out, exist_ok=True)
+    for path, img in zip(a.landmarks, fake):
+        img = ((img + 1) * 127.5).clip(0, 255).astype(np.uint8)
+        Image.fromarray(img).save(os.path.join(a.out, os.path.basename(path)))
 
-    embe.load_weights('trained_models/0_meta_embedder_in_combined.h5')
-    gene.load_weights('trained_models/monalisa_fewshot_generator_in_combined.h5')
-
-    style_embedding = embe.predict(style)
-    style_embedding = style_embedding.repeat(8, axis=0)  # [512] -> [8, 512]
-    fake_images = gene.predict([lndmk_images, style_embedding])
-    return fake_images
 
 if __name__ == '__main__':
-    frame_shape = (256, 256, 3)
-
-    lndmk_file_paths = ['datasets/voxceleb2-9f/train/lndmks/id00012/21Uxsk56VDQ/{}.jpg'.format(i) for i in range(8)]
-    style_frame_paths = ['datasets/fewshot/monalisa/frames/monalisa256-0.jpg']
-    style_lndmk_paths = ['datasets/fewshot/monalisa/lndmks/monalisa256-0.jpg']
-#    style_frame_paths = ['datasets/voxceleb2-9f/train/frames/id00012/21Uxsk56VDQ/{}.jpg'.format(i) for i in range(8)]
-#    style_lndmk_paths = ['datasets/voxceleb2-9f/train/lndmks/id00012/21Uxsk56VDQ/{}.jpg'.format(i) for i in range(8)]
-    fake_images = predict(lndmk_file_paths, style_frame_paths, style_lndmk_paths)
-    fake_images += 1
-    fake_images *= 127.5
-    fake_images = fake_images.astype(np.uint8)
-    for i in range(fake_images.shape[0]):
-        imageio.imwrite('{}.jpg'.format(i), fake_images[i])
+    main()

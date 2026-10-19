@@ -1,345 +1,287 @@
-from keras.applications.vgg19 import VGG19
-import keras.backend as K
-from keras.layers import Dense, Add, Input, ReLU, AveragePooling2D, GlobalAveragePooling1D, Dot, Concatenate, Lambda, UpSampling2D, Reshape, ZeroPadding2D, Cropping2D
-from keras.layers.core import Activation
-from keras.models import Model
-from keras.optimizers import Adam
-from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
-from keras_vggface.vggface import VGGFace
-import tensorflow as tf
+"""Networks of Zakharov et al. 2019, "Few-Shot Adversarial Learning of
+Realistic Neural Talking Head Models" (Keras 3 / TensorFlow backend).
 
-from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaInstanceNormalization, Bias, SelfAttention
+``Config`` collects every switch that differs between the original
+implementation of this repository (``Config.legacy()``) and the fixed one
+(``Config.fixed()``, the default). The legacy switches exist only so that the
+failure of the original code can be reproduced side by side (see
+``smoke_test.py``); they are not meant to be used for real training.
+"""
+from dataclasses import dataclass, replace
 
-# Caffe-style preprocessing (BGR, 0-255, mean subtracted) the pretrained VGG weights expect
-VGG19_MEAN_BGR = [103.939, 116.779, 123.68]
-VGGFACE_MEAN_BGR = [93.5940, 104.7624, 129.1863]
+import numpy as np
+import keras
+from keras import layers, ops
 
-
-def to_caffe_input(x, mean_bgr):
-    """ [-1, 1] RGB -> mean-subtracted [0, 255] BGR """
-    return Lambda(lambda x: (x[..., ::-1] + 1) * 127.5 - K.constant(mean_bgr))(x)
+from utils import AdaIN, GlobalSumPooling2D, SelfAttention, conv_sn, dense_sn, instance_norm
 
 
-class GAN:
-    def __init__(self, input_shape, num_videos, k):
-        """
-        input_shape: (H, W, 3)
-        k: The number of image pairs into embedder
-        """
-        self.h, self.w, self.c = self.input_shape = input_shape
-        self.num_videos = num_videos
-        self.k = k
+@dataclass(frozen=True)
+class Config:
+    image_size: int = 256
+    width: int = 64            # channels: w, 2w, 4w, 8w (paper: w = 64 -> 512-d embedding)
+    k: int = 8                 # number of frames given to the embedder
 
-    def downsample(self, x, channels, i_norm=False, fm=None):
-        """  Downsampling is similar to an implementation in BigGAN """
-        shortcut = x
- 
-        x = ReLU(name=fm)(x)
-        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same',)(x)
-        if i_norm:
-            x = InstanceNormalization(axis=-1)(x)  # use in generator
-        x = ReLU()(x)
-        x = ConvSN2D(channels, (3,3), strides=(1, 1), padding='same', kernel_initializer = 'he_normal')(x)
-        if i_norm:
-            x = InstanceNormalization(axis=-1)(x)  # use in generator
-        x = AveragePooling2D(pool_size=(2, 2))(x)
+    # --- switches between the original code (legacy) and the fixed code ---
+    adain_residual_scale: bool = True   # AdaIN scale = 1 + P e   (legacy: P e)
+    fixed_output_head: bool = True      # AdaIN->ReLU->Conv->tanh (legacy: Conv->ReLU->AdaIN->tanh)
+    first_block_preact: bool = False    # ReLU on the raw image in the first block (legacy: True)
+    g_adv_loss: str = 'neg'             # 'neg': -D(x_hat) (paper); 'hinge': max(0, 1 - D(x_hat))
+    vgg_preprocess: bool = True         # caffe preprocessing (BGR, 0-255, mean subtraction)
+    vgg_paper_layers: bool = True       # relu{1..5}_1 (legacy: conv1_2, conv2_2, conv3_4/3_3, ...)
+    mch_on_mean: bool = True            # L1(W_i, mean_k e_k) * 80 (legacy: sum_k L1(W_i, e_k) * 10)
+    random_frames: bool = True          # shuffle videos, random target/source frames each step
 
-        shortcut = ConvSN2D(channels, (1, 1), padding='same', kernel_initializer = 'he_normal')(shortcut)
-        shortcut = AveragePooling2D(pool_size=(2, 2))(shortcut)
+    # loss weights (paper values)
+    w_vgg19: float = 1.5e-1
+    w_vggface: float = 2.5e-2
+    w_fm: float = 10.0
+    w_mch: float = 80.0
 
-        x = Add()([x, shortcut])
-        return x
+    @property
+    def emb_dim(self):
+        return 8 * self.width
 
-    def resblock(self, x, channels, mean0, std0, mean1, std1):
-        """  channels doesn't change  """
-        shortcut = x
+    @staticmethod
+    def fixed(**kw):
+        return Config(**kw)
 
-        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        x = AdaInstanceNormalization()([x, mean0, std0])
-        x = ReLU()(x)
-        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        x = AdaInstanceNormalization()([x, mean1, std1])
+    @staticmethod
+    def legacy(**kw):
+        base = Config(adain_residual_scale=False, fixed_output_head=False, first_block_preact=True,
+                      g_adv_loss='hinge', vgg_preprocess=False, vgg_paper_layers=False,
+                      mch_on_mean=False, random_frames=False)
+        return replace(base, **kw)
 
-        x = Add()([x, shortcut])
-        return x
 
-    def resblock_d(self, x, channels, fm=None):
-        """  channels doesn't change  """
-        shortcut = x
+# ---------------------------------------------------------------- blocks
 
-        x = ReLU(name=fm)(x)  # Add preactivation ReLU to get feature matching activation layer
-        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        x = ReLU()(x)
-        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
+def downsample(x, channels, norm=False, preact=True, fm_out=None):
+    """BigGAN-style residual down block. ``fm_out`` collects the pre-activation
+    ReLU output (used for the feature-matching loss in the discriminator)."""
+    shortcut = x
+    if preact:
+        x = layers.ReLU()(x)
+        if fm_out is not None:
+            fm_out.append(x)
+    x = conv_sn(channels, 3)(x)
+    if norm:
+        x = instance_norm()(x)
+    x = layers.ReLU()(x)
+    x = conv_sn(channels, 3)(x)
+    if norm:
+        x = instance_norm()(x)
+    x = layers.AveragePooling2D(2)(x)
+    shortcut = conv_sn(channels, 1)(shortcut)
+    shortcut = layers.AveragePooling2D(2)(shortcut)
+    return layers.Add()([x, shortcut])
 
-        x = Add()([x, shortcut])
-        return x
 
-    def upsample(self, x, channels, mean0, std0, mean1, std1):
-        shortcut = x
+class _ParamSlicer:
+    """Hands out consecutive (shift, scale) slices of the flat AdaIN parameter vector."""
 
-        x = AdaInstanceNormalization()([x, mean0, std0])
-        x = ReLU()(x)
-        x = UpSampling2D(size=(2, 2))(x)
-        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
-        x = AdaInstanceNormalization()([x, mean1, std1])
-        x = ReLU()(x)
-        x = ConvSN2D(channels, (3, 3), padding='same', kernel_initializer='he_normal')(x)
+    def __init__(self, params):
+        self.params = params
+        self.offset = 0
 
-        shortcut = UpSampling2D(size=(2, 2))(shortcut)
-        shortcut = ConvSN2D(channels, (1, 1), kernel_initializer='he_normal')(shortcut)
+    def take(self, channels):
+        o = self.offset
+        shift = layers.Lambda(lambda p, a=o, b=o + channels: p[:, a:b])(self.params)
+        scale = layers.Lambda(lambda p, a=o + channels, b=o + 2 * channels: p[:, a:b])(self.params)
+        self.offset += 2 * channels
+        return shift, scale
 
-        x = Add()([x, shortcut])
-        return x
 
-    def build_embedder(self, name='embedder'):
-        h, w, c = self.input_shape
-        
-        input_landmark_frame = Input(shape=(h, w, c * 2))  # [:,:,:3]: landmark; [:,:,3:]: frame
-        hid = self.downsample(input_landmark_frame, 64)
-        hid = self.downsample(hid, 128)
-        hid = self.downsample(hid, 256)
-        hid = SelfAttention(256)(hid)
-        hid = self.downsample(hid, 512)
-        hid = self.downsample(hid, 512)
-        hid = self.downsample(hid, 512)
-        hid = ReLU()(hid)
-        embedding = GlobalSumPooling2D()(hid)
+def adain_param_channels(cfg):
+    """Channel count of every AdaIN layer in the generator, in order."""
+    w = cfg.width
+    chans = [8 * w] * 8                                   # 4 residual blocks x 2
+    for c_in, c_out in [(8 * w, 8 * w), (8 * w, 4 * w), (4 * w, 2 * w), (2 * w, w)]:
+        chans += [c_in, c_out]                            # 4 up blocks x 2
+    chans.append(w if cfg.fixed_output_head else 3)       # output head
+    return chans
 
-        embedder = Model(inputs=input_landmark_frame, outputs=embedding, name=name)
-        return embedder
 
-    def build_generator(self):
-        landmarks = Input(shape=self.input_shape, name='landmarks')
-        style_embedding = Input(shape=(512,), name='style_embedding')
+def num_adain_params(cfg):
+    return 2 * sum(adain_param_channels(cfg))
 
-        adain_param_length = 512*22+256*4+128*4+64*2+6
-        adain_params = DenseSN(adain_param_length)(style_embedding)
-        adain_params = Reshape((1, 1, adain_param_length))(adain_params)
 
-        # Slice AdaIN Parameters
-        mean_b00 = Lambda(lambda x: x[:,:,:, 0    :512])(adain_params)
-        std_b00  = Lambda(lambda x: x[:,:,:, 512  :512*2])(adain_params)
-        mean_b01 = Lambda(lambda x: x[:,:,:, 512*2:512*3])(adain_params)
-        std_b01  = Lambda(lambda x: x[:,:,:, 512*3:512*4])(adain_params)
+# ---------------------------------------------------------------- networks
 
-        mean_b10 = Lambda(lambda x: x[:,:,:, 512*4:512*5])(adain_params)
-        std_b10  = Lambda(lambda x: x[:,:,:, 512*5:512*6])(adain_params)
-        mean_b11 = Lambda(lambda x: x[:,:,:, 512*6:512*7])(adain_params)
-        std_b11  = Lambda(lambda x: x[:,:,:, 512*7:512*8])(adain_params)
+def build_embedder(cfg, name='embedder'):
+    s, w = cfg.image_size, cfg.width
+    inp = keras.Input((s, s, 6), name='landmark_frame')   # [..., :3] landmark, [..., 3:] frame
+    h = downsample(inp, w, preact=cfg.first_block_preact)
+    h = downsample(h, 2 * w)
+    h = downsample(h, 4 * w)
+    h = SelfAttention(4 * w)(h)
+    h = downsample(h, 8 * w)
+    h = downsample(h, 8 * w)
+    h = downsample(h, 8 * w)
+    h = layers.ReLU()(h)
+    e = GlobalSumPooling2D()(h)
+    return keras.Model(inp, e, name=name)
 
-        mean_b20 = Lambda(lambda x: x[:,:,:, 512*8:512*9])(adain_params)
-        std_b20  = Lambda(lambda x: x[:,:,:, 512*9:512*10])(adain_params)
-        mean_b21 = Lambda(lambda x: x[:,:,:, 512*10:512*11])(adain_params)
-        std_b21  = Lambda(lambda x: x[:,:,:, 512*11:512*12])(adain_params)
 
-        mean_b30 = Lambda(lambda x: x[:,:,:, 512*12:512*13])(adain_params)
-        std_b30  = Lambda(lambda x: x[:,:,:, 512*13:512*14])(adain_params)
-        mean_b31 = Lambda(lambda x: x[:,:,:, 512*14:512*15])(adain_params)
-        std_b31  = Lambda(lambda x: x[:,:,:, 512*15:512*16])(adain_params)
+def build_projector(cfg, name='projector'):
+    """Projection matrix P: embedding -> AdaIN parameters (psi_hat = P e_hat)."""
+    e = keras.Input((cfg.emb_dim,), name='embedding')
+    p = dense_sn(num_adain_params(cfg))(e)
+    return keras.Model(e, p, name=name)
 
-        mean_u00 = Lambda(lambda x: x[:,:,:, 512*16:512*17])(adain_params)
-        std_u00  = Lambda(lambda x: x[:,:,:, 512*17:512*18])(adain_params)
-        mean_u01 = Lambda(lambda x: x[:,:,:, 512*18:512*19])(adain_params)
-        std_u01  = Lambda(lambda x: x[:,:,:, 512*19:512*20])(adain_params)
 
-        mean_u10 = Lambda(lambda x: x[:,:,:, 512*20    :512*21])(adain_params)
-        std_u10  = Lambda(lambda x: x[:,:,:, 512*21    :512*22])(adain_params)
-        mean_u11 = Lambda(lambda x: x[:,:,:, 512*22    :512*22+256])(adain_params)
-        std_u11  = Lambda(lambda x: x[:,:,:, 512*22+256:512*22+256*2])(adain_params)
+def build_generator(cfg, name='generator'):
+    """Generator G(landmarks, psi). psi is the flat AdaIN parameter vector,
+    so that it can be fine-tuned directly in the few-shot stage (psi')."""
+    s, w = cfg.image_size, cfg.width
+    rs = cfg.adain_residual_scale
+    lmk = keras.Input((s, s, 3), name='landmarks')
+    psi = keras.Input((num_adain_params(cfg),), name='adain_params')
+    sl = _ParamSlicer(psi)
 
-        mean_u20 = Lambda(lambda x: x[:,:,:, 512*22+256*2    :512*22+256*3])(adain_params)
-        std_u20  = Lambda(lambda x: x[:,:,:, 512*22+256*3    :512*22+256*4])(adain_params)
-        mean_u21 = Lambda(lambda x: x[:,:,:, 512*22+256*4    :512*22+256*4+128])(adain_params)
-        std_u21  = Lambda(lambda x: x[:,:,:, 512*22+256*4+128:512*22+256*4+128*2])(adain_params)
+    h = downsample(lmk, w, norm=True, preact=cfg.first_block_preact)
+    h = downsample(h, 2 * w, norm=True)
+    h = downsample(h, 4 * w, norm=True)
+    h = SelfAttention(4 * w)(h)
+    h = downsample(h, 8 * w, norm=True)
 
-        mean_u30 = Lambda(lambda x: x[:,:,:, 512*22+256*4+128*2   :512*22+256*4+128*3])(adain_params)
-        std_u30  = Lambda(lambda x: x[:,:,:, 512*22+256*4+128*3   :512*22+256*4+128*4])(adain_params)
-        mean_u31 = Lambda(lambda x: x[:,:,:, 512*22+256*4+128*4   :512*22+256*4+128*4+64])(adain_params)
-        std_u31  = Lambda(lambda x: x[:,:,:, 512*22+256*4+128*4+64:512*22+256*4+128*4+64*2])(adain_params)
+    for _ in range(4):                       # residual blocks at the bottleneck
+        sc = h
+        h = conv_sn(8 * w, 3)(h)
+        h = AdaIN(rs)([h, *sl.take(8 * w)])
+        h = layers.ReLU()(h)
+        h = conv_sn(8 * w, 3)(h)
+        h = AdaIN(rs)([h, *sl.take(8 * w)])
+        h = layers.Add()([h, sc])
 
-        mean_u4 = Lambda(lambda x: x[:,:,:, 512*22+256*4+128*4+64*2  :512*22+256*4+128*4+64*2+3])(adain_params)
-        std_u4  = Lambda(lambda x: x[:,:,:, 512*22+256*4+128*4+64*2+3:512*22+256*4+128*4+64*2+6])(adain_params)
+    for i, (c_in, c_out) in enumerate([(8 * w, 8 * w), (8 * w, 4 * w), (4 * w, 2 * w), (2 * w, w)]):
+        sc = h
+        h = AdaIN(rs)([h, *sl.take(c_in)])
+        h = layers.ReLU()(h)
+        h = layers.UpSampling2D(2)(h)
+        h = conv_sn(c_out, 3)(h)
+        h = AdaIN(rs)([h, *sl.take(c_out)])
+        h = layers.ReLU()(h)
+        h = conv_sn(c_out, 3)(h)
+        sc = layers.UpSampling2D(2)(sc)
+        sc = conv_sn(c_out, 1)(sc)
+        h = layers.Add()([h, sc])
+        if i == 1:
+            h = SelfAttention(4 * w)(h)
 
-        # Main forward
-        hid = self.downsample(landmarks, 64, i_norm=True)
-        hid = self.downsample(hid, 128, i_norm=True)
-        hid = self.downsample(hid, 256, i_norm=True)
-        hid = SelfAttention(256)(hid)
-        hid = self.downsample(hid, 512, i_norm=True)
-        
-        hid = self.resblock(hid, 512, mean_b00, std_b00, mean_b01, std_b01)
-        hid = self.resblock(hid, 512, mean_b10, std_b10, mean_b11, std_b11)
-        hid = self.resblock(hid, 512, mean_b20, std_b20, mean_b21, std_b21)
-        hid = self.resblock(hid, 512, mean_b30, std_b30, mean_b31, std_b31)
-        
-        hid = self.upsample(hid, 512, mean_u00, std_u00, mean_u01, std_u01)
-        hid = self.upsample(hid, 256, mean_u10, std_u10, mean_u11, std_u11)
-        hid = SelfAttention(256)(hid)
-        hid = self.upsample(hid, 128, mean_u20, std_u20, mean_u21, std_u21)
-        hid = self.upsample(hid, 64,  mean_u30, std_u30, mean_u31, std_u31)
-        hid = ConvSN2D(3, (1, 1), padding='same', kernel_initializer='he_normal')(hid)
-        hid = ReLU()(hid)
-        hid = AdaInstanceNormalization()([hid, mean_u4, std_u4])
-        fake_frame = Activation('tanh', name='fake_frame')(hid)
+    if cfg.fixed_output_head:
+        h = AdaIN(rs)([h, *sl.take(w)])
+        h = layers.ReLU()(h)
+        h = conv_sn(3, 3)(h)
+    else:  # original: Conv(3) -> ReLU -> AdaIN(3 channels) -> tanh
+        h = conv_sn(3, 1)(h)
+        h = layers.ReLU()(h)
+        h = AdaIN(rs)([h, *sl.take(3)])
+    out = layers.Activation('tanh', name='fake_frame')(h)
+    assert sl.offset == num_adain_params(cfg)
+    return keras.Model([lmk, psi], out, name=name)
 
-        generator = Model(
-            inputs=[landmarks, style_embedding],
-            outputs=[fake_frame],
-            name='generator')
-        return generator
-    
-    def build_discriminator(self, meta):
-        """
-        realicity = dot(v, w)
-        w = Pc+w_0 (P: Projection Matrix; c: one-hot condition)
-        """
-        input_frame = Input(shape=self.input_shape, name='frames')
-        input_landmark = Input(shape=self.input_shape, name='landmarks')
-        inputs = Concatenate()([input_frame, input_landmark])
-        hid = self.downsample(inputs, 64)
-        hid = self.downsample(hid, 128, fm='fm6')
-        hid = self.downsample(hid, 256, fm='fm5')
-        hid = SelfAttention(256)(hid)
-        hid = self.downsample(hid, 512, fm='fm4')
-        hid = self.downsample(hid, 512, fm='fm3')
-        hid = self.downsample(hid, 512, fm='fm2')
-        hid = self.resblock_d(hid, 512, fm='fm1')
-        hid = ReLU(name='fm0')(hid)
-        v = GlobalSumPooling2D()(hid)
 
-        if meta:
-            condition = Input(shape=(self.num_videos,), name='condition')
-            W_i = Dense(512, use_bias=False, name='W_i')(condition)  # Projection Matrix, P
-        else:
-            W_i  = Input(shape=(512,), name='e_NEW')
-        w = Bias(name='w')(W_i)  # w = W_i + w_0
-        
-        innerproduct = Dot(axes=-1)([v, w])
-        realicity = Bias(name='realicity')(innerproduct)
-        
-        if meta:
-            inputs = [input_frame, input_landmark, condition]
-        else:
-            inputs = [input_frame, input_landmark, W_i]
-        discriminator = Model(
-            inputs=inputs,
-            outputs=[realicity],
-            name='discriminator'
-        )
-        return discriminator
+@keras.saving.register_keras_serializable(package='talking_heads')
+class ProjectionHead(layers.Layer):
+    """r = v . (W_i + w_0) + b"""
 
-    def _build_embedding_discriminator_model(self, discriminator):
-        self.embedding_discriminator = Model(discriminator.get_layer('condition').input, discriminator.get_layer('W_i').output, name='embedding_discriminator')
-        return self.embedding_discriminator
+    def build(self, input_shape):
+        d = input_shape[0][-1]
+        self.w0 = self.add_weight(name='w0', shape=(d,), initializer='zeros')
+        self.b = self.add_weight(name='b', shape=(1,), initializer='zeros')
 
-    def _build_intermediate_discriminator_model(self, discriminator):
-        layer_names = ['fm{}'.format(i) for i in range(0, 7)]
-        fm_outputs = [discriminator.get_layer(layer_name).output for layer_name in layer_names]
-        self.intermediate_discriminator = Model(discriminator.input[:2], fm_outputs, name='intermediate_discriminator')
-        return self.intermediate_discriminator
-        
-    def compile_models(self, meta, gpus=1):
-        # Compile discriminator
-        discriminator = self.build_discriminator(meta)
-        discriminator.trainable = True
-        if gpus > 1:
-            parallel_discriminator = multi_gpu_model(discriminator, gpus=4)
-            parallel_discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=1e-5))
-        else:
-            discriminator.compile(loss='hinge', optimizer=Adam(lr=2e-4, beta_1=1e-5))
+    def call(self, inputs):
+        v, w_i = inputs
+        return ops.sum(v * (w_i + self.w0), axis=-1, keepdims=True) + self.b
 
-        # Compile Combined model to train generator
-        embedder = self.build_embedder()
-        generator = self.build_generator()
-        intermediate_discriminator = self._build_intermediate_discriminator_model(discriminator)
-        intermediate_vgg19 = self.build_intermediate_vgg19_model()
-        intermediate_vggface = self.build_intermediate_vggface_model()
-        discriminator.trainable = False
-        intermediate_discriminator.trainable = False
-        intermediate_vgg19.trainable = False
-        intermediate_vggface.trainable = False
 
-        input_lndmk = Input(shape=self.input_shape, name='landmarks')
-        condition = Input(shape=(self.num_videos,), name='condition')
-        inputs_embedder = [Input((self.h, self.w, self.c * 2), name='style{}'.format(i)) for i in range(self.k)]  # (BATCH_SIZE, H, W, 6)
-        embeddings = [embedder(em_input) for em_input in inputs_embedder]  # (BATCH_SIZE, 512)
+def build_discriminator(cfg, name='discriminator'):
+    """Returns a model mapping [frame, landmarks, W_i] -> [score, *features]."""
+    s, w = cfg.image_size, cfg.width
+    frame = keras.Input((s, s, 3), name='frame')
+    lmk = keras.Input((s, s, 3), name='landmarks')
+    w_i = keras.Input((cfg.emb_dim,), name='w_i')
+    fms = []
+    h = layers.Concatenate()([frame, lmk])
+    h = downsample(h, w, preact=cfg.first_block_preact)
+    h = downsample(h, 2 * w, fm_out=fms)
+    h = downsample(h, 4 * w, fm_out=fms)
+    h = SelfAttention(4 * w)(h)
+    h = downsample(h, 8 * w, fm_out=fms)
+    h = downsample(h, 8 * w, fm_out=fms)
+    h = downsample(h, 8 * w, fm_out=fms)
+    sc = h
+    h = layers.ReLU()(h)
+    fms.append(h)
+    h = conv_sn(8 * w, 3)(h)
+    h = layers.ReLU()(h)
+    h = conv_sn(8 * w, 3)(h)
+    h = layers.Add()([h, sc])
+    h = layers.ReLU()(h)
+    fms.append(h)
+    v = GlobalSumPooling2D()(h)
+    score = ProjectionHead()([v, w_i])
+    return keras.Model([frame, lmk, w_i], [score] + fms, name=name)
 
-        if self.k > 1:
-            embeddings_expand = [Lambda(lambda x: K.expand_dims(x, axis=1))(embedding) for embedding in embeddings]  # (BATCH_SIZE, 1, 512)
-            embedding_k = Concatenate(axis=1)(embeddings_expand)  # (BATCH_SIZE, K, 512)
-            average_embedding = GlobalAveragePooling1D()(embedding_k)  # (BATCH_SIZE, 512)
-        else:
-            average_embedding = embeddings[0]
 
-        fake_frame = generator([input_lndmk, average_embedding])
-        intermediate_vgg19_fakes = intermediate_vgg19(fake_frame)
-        intermediate_vggface_fakes = intermediate_vggface(fake_frame)
-        intermediate_discriminator_fakes = intermediate_discriminator([fake_frame, input_lndmk])
-        
-        if meta:
-            self._build_embedding_discriminator_model(discriminator)  # Call embedding discriminator when meta learning
-            realicity = discriminator([fake_frame, input_lndmk, condition])
-            combined = Model(
-                inputs = [input_lndmk] + inputs_embedder + [condition],
-                outputs = intermediate_vgg19_fakes + intermediate_vggface_fakes + [realicity] + intermediate_discriminator_fakes + embeddings,
-                name = 'combined'
-                )
-            loss = ['mae'] * len(intermediate_vgg19_fakes) + ['mae'] * len(intermediate_vggface_fakes) + ['hinge'] + ['mae'] * len(intermediate_discriminator_fakes) + ['mae'] * self.k
-            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [1] + [10] * len(intermediate_discriminator_fakes) + [10] * self.k
-        else:
-            embedder.trainable = False
-            realicity = discriminator([fake_frame, input_lndmk, average_embedding])
-            combined = Model(
-                inputs = [input_lndmk] + inputs_embedder,
-                outputs = intermediate_vgg19_fakes + intermediate_vggface_fakes + [realicity] + intermediate_discriminator_fakes,
-                name = 'combined'
-            )
-            loss = ['mae'] * len(intermediate_vgg19_fakes) + ['mae'] * len(intermediate_vggface_fakes) + ['hinge'] + ['mae'] * len(intermediate_discriminator_fakes)
-            loss_weights = [1.5e-1] * len(intermediate_vgg19_fakes) + [2.5e-2] * len(intermediate_vggface_fakes) + [1] + [10] * len(intermediate_discriminator_fakes)
+# ---------------------------------------------------------------- perceptual networks
 
-        self.embedder = embedder
-        self.generator = generator
-        self.combined = combined
-        self.discriminator = discriminator
+VGG19_URL = ('https://github.com/fchollet/deep-learning-models/releases/download/v0.1/'
+             'vgg19_weights_tf_dim_ordering_tf_kernels_notop.h5')
+VGGFACE_URL = ('https://github.com/rcmalli/keras-vggface/releases/download/v2.0/'
+               'rcmalli_vggface_tf_notop_vgg16.h5')
 
-        if gpus > 1:
-            parallel_combined = multi_gpu_model(combined, gpus=gpus)
-            parallel_combined.compile(
-                loss=loss,
-                loss_weights=loss_weights,
-                optimizer=Adam(lr=5e-5, beta_1=1e-5)
-            )
+VGG19_MEAN_BGR = np.array([103.939, 116.779, 123.68], dtype='float32')
+VGGFACE_MEAN_BGR = np.array([93.5940, 104.7624, 129.1863], dtype='float32')
 
-            self.parallel_combined = parallel_combined
-            self.parallel_discriminator = parallel_discriminator
+# Paper: "conv1, 6, 11, 20, 29" of VGG19 and "conv1, 6, 11, 18, 25" of VGGFace.
+# These are torchvision module indices and point at relu1_1 ... relu5_1.
+# (Keras Conv2D layers include the ReLU.)
+VGG19_PAPER = ['block1_conv1', 'block2_conv1', 'block3_conv1', 'block4_conv1', 'block5_conv1']
+VGG19_LEGACY = ['block1_conv2', 'block2_conv2', 'block3_conv4', 'block4_conv4', 'block5_conv4']
+VGGFACE_PAPER = ['conv1_1', 'conv2_1', 'conv3_1', 'conv4_1', 'conv5_1']
+VGGFACE_LEGACY = ['conv1_2', 'conv2_2', 'conv3_3', 'conv4_3', 'conv5_3']
 
-            return parallel_combined, parallel_discriminator, combined, discriminator
 
-        combined.compile(
-            loss=loss,
-            loss_weights=loss_weights,
-            optimizer=Adam(lr=5e-5, beta_1=1e-5)
-        )
-        return combined, combined, discriminator, discriminator
+def _get_weights(path, url):
+    if path:
+        return path
+    return keras.utils.get_file(url.rsplit('/', 1)[-1], url, cache_subdir='models')
 
-    def build_intermediate_vgg19_model(self):
-        vgg19 = VGG19(input_shape=self.input_shape, weights='imagenet', include_top=False)
-        vgg19.trainable = False
-        # Paper says Conv1, 6, 11, 20, 29 VGG19 layers but it isn't clear which layer is which layer
-        layer_names = ['block1_conv2', 'block2_conv2', 'block3_conv4', 'block4_conv4', 'block5_conv4']
-        intermediate_outputs = [vgg19.get_layer(layer_name).output for layer_name in layer_names]
-        features = Model(vgg19.input, intermediate_outputs)
-        frame = Input(shape=self.input_shape)
-        self.intermediate_vgg19 = Model(frame, features(to_caffe_input(frame, VGG19_MEAN_BGR)), name='intermediate_vgg19')
-        return self.intermediate_vgg19
 
-    def build_intermediate_vggface_model(self):
-        vggface = VGGFace(input_shape=self.input_shape, weights='vggface', include_top=False)
-        vggface.trainable = False
-        layer_names = ['conv1_2', 'conv2_2', 'conv3_3', 'conv4_3', 'conv5_3']
-        intermediate_outputs = [vggface.get_layer(layer_name).output for layer_name in layer_names]
-        features = Model(vggface.input, intermediate_outputs)
-        frame = Input(shape=self.input_shape)
-        self.intermediate_vggface = Model(frame, features(to_caffe_input(frame, VGGFACE_MEAN_BGR)), name='intermediate_vggface')
-        return self.intermediate_vggface
+def _vggface_vgg16(size):
+    inp = keras.Input((size, size, 3))
+    h = inp
+    for b, (n, c) in enumerate([(2, 64), (2, 128), (3, 256), (3, 512), (3, 512)], start=1):
+        for j in range(1, n + 1):
+            h = layers.Conv2D(c, 3, padding='same', activation='relu', name=f'conv{b}_{j}')(h)
+        h = layers.MaxPooling2D(2, name=f'pool{b}')(h)
+    return keras.Model(inp, h, name='vggface_vgg16')
+
+
+def build_perceptual(cfg, which, weights_path=None):
+    """Frozen feature extractor taking images in [-1, 1] (RGB)."""
+    s = cfg.image_size
+    if which == 'vgg19':
+        base = keras.applications.VGG19(include_top=False, weights=None, input_shape=(s, s, 3))
+        base.load_weights(_get_weights(weights_path, VGG19_URL))
+        names, mean = (VGG19_PAPER if cfg.vgg_paper_layers else VGG19_LEGACY), VGG19_MEAN_BGR
+    elif which == 'vggface':
+        base = _vggface_vgg16(s)
+        base.load_weights(_get_weights(weights_path, VGGFACE_URL))
+        names, mean = (VGGFACE_PAPER if cfg.vgg_paper_layers else VGGFACE_LEGACY), VGGFACE_MEAN_BGR
+    else:
+        raise ValueError(which)
+    base.trainable = False
+    feat = keras.Model(base.input, [base.get_layer(n).output for n in names])
+    feat.trainable = False
+
+    inp = keras.Input((s, s, 3))
+    x = inp
+    if cfg.vgg_preprocess:
+        x = layers.Lambda(lambda t: (t + 1.0) * 127.5)(x)        # [-1, 1] -> [0, 255]
+        x = layers.Lambda(lambda t: t[..., ::-1] - mean)(x)       # RGB -> BGR, subtract mean
+    model = keras.Model(inp, feat(x), name=f'perceptual_{which}')
+    model.trainable = False
+    return model

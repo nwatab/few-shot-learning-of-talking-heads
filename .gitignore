@@ -1,0 +1,7 @@
+__pycache__/
+.DS_Store
+datasets/
+trained_models/
+runs/
+logs/
+*.h5
