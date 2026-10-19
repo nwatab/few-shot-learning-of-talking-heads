@@ -31,6 +31,14 @@ python fewshot_learning.py --data datasets/fewshot/monalisa --meta-dir trained_m
 python prediction.py --finetuned trained_models/monalisa --landmarks path/to/landmarks/*.jpg --out results
 ```
 
+With Docker (Python 3.11; runs natively on arm64 and amd64):
+
+```bash
+docker build -t fsth .
+docker run --rm -v "$PWD":/workspace -v "$HOME/.keras":/root/.keras fsth \
+  python meta_learning.py --data datasets/voxceleb2-9f/train --out trained_models
+```
+
 VGG19 and VGGFace weights are downloaded from GitHub releases on first use
 (or pass `--vgg19-weights` / `--vggface-weights`).
 `Config.legacy()` (`--legacy`) reproduces the original behaviour for comparison only.
