@@ -10,6 +10,15 @@ import tensorflow as tf
 
 from utils import GlobalSumPooling2D, ConvSN2D, DenseSN, AdaInstanceNormalization, Bias, SelfAttention
 
+# Caffe-style preprocessing (BGR, 0-255, mean subtracted) the pretrained VGG weights expect
+VGG19_MEAN_BGR = [103.939, 116.779, 123.68]
+VGGFACE_MEAN_BGR = [93.5940, 104.7624, 129.1863]
+
+
+def to_caffe_input(x, mean_bgr):
+    """ [-1, 1] RGB -> mean-subtracted [0, 255] BGR """
+    return Lambda(lambda x: (x[..., ::-1] + 1) * 127.5 - K.constant(mean_bgr))(x)
+
 
 class GAN:
     def __init__(self, input_shape, num_videos, k):
@@ -320,7 +329,9 @@ class GAN:
         # Paper says Conv1, 6, 11, 20, 29 VGG19 layers but it isn't clear which layer is which layer
         layer_names = ['block1_conv2', 'block2_conv2', 'block3_conv4', 'block4_conv4', 'block5_conv4']
         intermediate_outputs = [vgg19.get_layer(layer_name).output for layer_name in layer_names]
-        self.intermediate_vgg19 = Model(vgg19.input, intermediate_outputs, name='intermediate_vgg19')
+        features = Model(vgg19.input, intermediate_outputs)
+        frame = Input(shape=self.input_shape)
+        self.intermediate_vgg19 = Model(frame, features(to_caffe_input(frame, VGG19_MEAN_BGR)), name='intermediate_vgg19')
         return self.intermediate_vgg19
 
     def build_intermediate_vggface_model(self):
@@ -328,5 +339,7 @@ class GAN:
         vggface.trainable = False
         layer_names = ['conv1_2', 'conv2_2', 'conv3_3', 'conv4_3', 'conv5_3']
         intermediate_outputs = [vggface.get_layer(layer_name).output for layer_name in layer_names]
-        self.intermediate_vggface = Model(vggface.input, intermediate_outputs, name='intermediate_vggface')
+        features = Model(vggface.input, intermediate_outputs)
+        frame = Input(shape=self.input_shape)
+        self.intermediate_vggface = Model(frame, features(to_caffe_input(frame, VGGFACE_MEAN_BGR)), name='intermediate_vggface')
         return self.intermediate_vggface
